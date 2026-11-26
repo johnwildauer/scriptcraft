@@ -8,6 +8,7 @@ mod indexes;
 mod navigation;
 mod reconciliation;
 mod state;
+mod dialogue_alts;
 mod text;
 mod title;
 mod validation;

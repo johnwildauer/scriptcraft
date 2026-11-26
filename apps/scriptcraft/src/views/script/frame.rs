@@ -10,6 +10,10 @@ use std::time::Instant;
 use super::page_policy::{
     presented_page_policy, resolve_presentation_mode, viewport_paint_page_range,
 };
+use super::alt_dialogue_overlay::{
+    hovered_control as hovered_alt_control_at, project_visible_controls as project_alt_controls,
+    AltOverlayAction, AltOverlayGeometry,
+};
 use super::note_overlay::{
     hovered_marker, marker_at, project_visible_markers, NoteLineKey, NoteMarkerGeometry,
 };
@@ -261,6 +265,8 @@ impl ScriptCraftApp {
         let mut visible_pages = 0;
         let mut frame_note_markers = Vec::<NoteMarkerGeometry>::new();
         let mut hovered_note_marker: Option<NoteLineKey> = None;
+        let mut frame_alt_controls = Vec::<AltOverlayGeometry>::new();
+        let mut hovered_alt_control: Option<AltOverlayAction> = None;
         let reveal_intent = self.reveal_intent;
         let pending_zoom_anchor = self.pending_zoom_anchor;
         let zoom_compensation_offset = pending_zoom_anchor.and_then(|anchor| {
@@ -449,6 +455,32 @@ impl ScriptCraftApp {
                 &frame_note_markers,
                 ui.input(|input| input.pointer.latest_pos()),
             );
+            if surface == EditorSurface::Body
+                && layout.purpose == scriptcraft_layout::LayoutPurpose::Editor
+            {
+                let active_alt_element = if self.app_command_availability().dialogue_alt_add {
+                    self.session
+                        .dialogue_alt_target()
+                        .filter(|target| target.can_add)
+                        .map(|target| target.element_index)
+                } else {
+                    None
+                };
+                frame_alt_controls = project_alt_controls(
+                    &layout,
+                    self.session.project(),
+                    &presented_pages,
+                    &pages_to_project,
+                    scale,
+                    editor_clip,
+                    active_alt_element,
+                    ui.painter(),
+                );
+                hovered_alt_control = hovered_alt_control_at(
+                    &frame_alt_controls,
+                    ui.input(|input| input.pointer.latest_pos()),
+                );
+            }
             let hovered_key = hovered_note_marker
                 .map(|key| (key.page_index, key.line_index));
             if self.script_note_workspace.hovered_marker != hovered_key {
@@ -489,6 +521,11 @@ impl ScriptCraftApp {
                         .filter(|marker| marker.line_key.page_index == page_index)
                         .cloned()
                         .collect::<Vec<_>>();
+                    let page_alt_controls = frame_alt_controls
+                        .iter()
+                        .filter(|control| control.page_index == page_index)
+                        .cloned()
+                        .collect::<Vec<_>>();
                     self.paint_page(
                         ui,
                         &layout,
@@ -503,6 +540,9 @@ impl ScriptCraftApp {
                         presentation_mode,
                         &page_markers,
                         hovered_note_marker,
+                        &page_alt_controls,
+                        hovered_alt_control,
+                        editor_clip,
                     );
                 }
             }
@@ -591,7 +631,9 @@ impl ScriptCraftApp {
                     Sense::click_and_drag()
                 },
             )
-            .on_hover_cursor(if hovered_note_marker.is_some() {
+            .on_hover_cursor(if hovered_alt_control.is_some() {
+                egui::CursorIcon::PointingHand
+            } else if hovered_note_marker.is_some() {
                 egui::CursorIcon::PointingHand
             } else {
                 document_cursor_icon()
@@ -602,6 +644,13 @@ impl ScriptCraftApp {
                 && response
                     .interact_pointer_pos()
                     .is_some_and(|pointer| marker_at(&frame_note_markers, pointer).is_some());
+            let secondary_on_alt_control = surface == EditorSurface::Body
+                && response.secondary_clicked()
+                && (response.interact_pointer_pos().is_some_and(|pointer| {
+                    hovered_alt_control_at(&frame_alt_controls, Some(pointer)).is_some()
+                }) || ui.input(|input| input.pointer.press_origin()).is_some_and(|origin| {
+                    hovered_alt_control_at(&frame_alt_controls, Some(origin)).is_some()
+                }));
             self.handle_pointer_response(
                 ui,
                 editor_id,
@@ -612,8 +661,12 @@ impl ScriptCraftApp {
                 &frame_projections,
                 surface,
                 &frame_note_markers,
+                &frame_alt_controls,
             );
-            if surface == EditorSurface::Body && !secondary_on_note_marker {
+            if surface == EditorSurface::Body
+                && !secondary_on_note_marker
+                && !secondary_on_alt_control
+            {
                 self.show_body_context_menu(&response, ui.ctx());
             }
         }

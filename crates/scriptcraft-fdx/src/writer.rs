@@ -456,6 +456,11 @@ fn write_v6_inner(
         )?;
         let mut sections = definition_projection.sections;
         reconcile_project_elements(&mut sections, project)?;
+        crate::dialogue_alts_output::project_source_backed(
+            &mut sections,
+            project,
+            &original.project,
+        )?;
         let beat_projection = crate::beat_board_output::project_beat_source(
             &sections, project, context, state, original.project.beat_board(), original_state,
             normalize_duplicates,

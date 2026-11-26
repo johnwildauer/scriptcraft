@@ -9,7 +9,9 @@ use scriptcraft_model::Project;
 use super::document_font_preparation::DocumentFontPreparation;
 use super::renderer_font_registration::RendererFontRegistration;
 
-pub(crate) use super::document_font_preparation::{FontPreparationError, PreparedDocumentFonts};
+pub(crate) use super::document_font_preparation::{
+    DocumentFontPreparationObservation, FontPreparationError, PreparedDocumentFonts,
+};
 
 pub(crate) fn install(context: &egui::Context) -> DocumentFontStore {
     super::bundled_font_startup::install(context);
@@ -28,6 +30,14 @@ impl DocumentFontStore {
         project: &Project,
     ) -> Result<PreparedDocumentFonts, FontPreparationError> {
         self.preparation.prepare_document(project)
+    }
+
+    pub(crate) fn prepare_document_observed(
+        &mut self,
+        project: &Project,
+    ) -> Result<(PreparedDocumentFonts, DocumentFontPreparationObservation), FontPreparationError>
+    {
+        self.preparation.prepare_document_observed(project)
     }
 
     pub(crate) fn register_prepared_fonts(

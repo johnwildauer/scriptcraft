@@ -1,5 +1,6 @@
 use crate::{
-    element_type::ElementTypeKey, identity::StableId, validation::validate_element, ModelError,
+    dialogue_alts::DialogueAlternatives, element_type::ElementTypeKey, identity::StableId,
+    validation::validate_element, ModelError,
     MAX_TEXT_BYTES,
 };
 use std::collections::BTreeSet;
@@ -62,6 +63,9 @@ pub struct ScreenplayElement {
     pub text: String,
     /// Empty for legacy plain-text elements; populated runs remain source ordered.
     pub runs: Vec<TextRun>,
+    /// Inactive Dialogue variants travel with this owner and remain dormant
+    /// when its current element type is not Dialogue-capable.
+    pub dialogue_alternatives: Option<DialogueAlternatives>,
     pub source_provenance: Option<SourceProvenance>,
 }
 
@@ -91,6 +95,7 @@ impl ScreenplayElement {
             element_type: element_type.into(),
             text,
             runs: Vec::new(),
+            dialogue_alternatives: None,
             source_provenance: None,
         })
     }
@@ -122,6 +127,7 @@ impl ScreenplayElement {
             element_type: element_type.into(),
             text,
             runs,
+            dialogue_alternatives: None,
             source_provenance,
         };
         validate_element(&element)?;

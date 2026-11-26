@@ -1170,11 +1170,11 @@ const SPACE_BEFORE_MENU: MenuSpec = MenuSpec { id: "format.space-before", label:
 const LEADING_MENU: MenuSpec = MenuSpec { id: "format.leading", label: "Leading", accessibility_name: "Leading", entries: LEADING_ENTRIES };
 
 const INSERT_ENTRIES: &[MenuEntrySpec] = &[
-    placeholder(
+    command_item(
         "insert.add-alt",
         "Add Alt",
-        "Add Alt (disabled placeholder)",
-        ITEM,
+        "Add Alt",
+        None,
         Some(display_shortcut(
             ShortcutKey::Period,
             true,
@@ -1182,12 +1182,14 @@ const INSERT_ENTRIES: &[MenuEntrySpec] = &[
             false,
             true,
         )),
+        None,
+        CommandId::EditorDialogueAltAdd,
     ),
-    placeholder(
+    command_item(
         "insert.remove-alt",
         "Remove Alt",
-        "Remove Alt (disabled placeholder)",
-        ITEM,
+        "Remove Alt",
+        None,
         Some(display_shortcut(
             ShortcutKey::Comma,
             true,
@@ -1195,14 +1197,18 @@ const INSERT_ENTRIES: &[MenuEntrySpec] = &[
             false,
             true,
         )),
+        None,
+        CommandId::EditorDialogueAltDelete,
     ),
     SEP,
-    placeholder(
+    command_item(
         "insert.new-beat",
         "New Beat",
-        "New Beat (disabled placeholder)",
-        ITEM,
+        "New Beat",
+        None,
         Some(primary_shortcut(ShortcutKey::Enter, false)),
+        None,
+        CommandId::BeatBoardCardCreate,
     ),
     SEP,
     placeholder(

@@ -8,7 +8,7 @@ use scriptcraft_commands::{
     ScriptNoteColorValue, ScriptNoteCreateValue, ScriptNoteIdValue,
     ScriptNoteNavigationValue, ScriptNotePresentValue, ScriptNotePropertiesValue,
     ScriptNoteSelectionValue, ScriptNoteTextEditValue, ScriptNoteTextOperationValue,
-    ScriptNoteTimestampValue,
+    ScriptNoteTimestampValue, BeatPointValue,
 };
 use std::collections::VecDeque;
 
@@ -34,8 +34,9 @@ impl CommandInvocation {
     }
 }
 
-/// Static menu, toolbar, and native application-menu IDs map to parameterless
-/// commands. Dynamic payloads (such as an exact toolbar element type) are built at activation.
+/// Static menu, toolbar, and native application-menu IDs map to shared commands,
+/// including fixed payloads where needed. Dynamic payloads (such as an exact
+/// toolbar element type) are built at activation.
 pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
     Some(match id {
         CommandId::FileNew => Command::FileNew,
@@ -117,6 +118,14 @@ pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::ScriptNoteRunFormattingSet => Command::ScriptNoteRunFormattingSet {
             patch: Default::default(),
             modified: current_local_timestamp_value()?,
+        },
+        CommandId::EditorDialogueAltAdd => Command::EditorDialogueAltAdd,
+        CommandId::EditorDialogueAltDelete => Command::EditorDialogueAltDelete,
+        CommandId::EditorDialogueAltNavigate => Command::EditorDialogueAltNavigate {
+            direction: scriptcraft_commands::HorizontalDirection::Left,
+        },
+        CommandId::BeatBoardCardCreate => Command::BeatBoardCardCreate {
+            position: BeatPointValue { x: 20_000, y: 20_000 },
         },
         _ => return None,
     })
@@ -334,6 +343,9 @@ impl ScriptCraftApp {
     ) -> DesktopCommandOutcome {
         let availability = self.command_dispatch_availability(&command);
         if !availability.is_enabled(command.id()) {
+            if self.development_mode && is_alt_command(command.id()) {
+                self.responsiveness.record_alt_availability_rejection();
+            }
             if let Some(outcome) = self.unavailable_save_outcome(
                 command.id(),
                 availability.unavailable_reason(command.id()),
@@ -387,6 +399,9 @@ impl ScriptCraftApp {
             | Command::EditorRunFormattingSet { .. }
             | Command::EditorParagraphFormattingSet { .. }
             | Command::EditorDualDialogueToggle
+            | Command::EditorDialogueAltAdd
+            | Command::EditorDialogueAltDelete
+            | Command::EditorDialogueAltNavigate { .. }
             | Command::EditUndo
             | Command::EditRedo
             | Command::EditDelete
@@ -503,6 +518,15 @@ impl ScriptCraftApp {
                 message: Some(message),
             });
     }
+}
+
+fn is_alt_command(command: CommandId) -> bool {
+    matches!(
+        command,
+        CommandId::EditorDialogueAltAdd
+            | CommandId::EditorDialogueAltDelete
+            | CommandId::EditorDialogueAltNavigate
+    )
 }
 
 fn route_to_script_note_formatting(

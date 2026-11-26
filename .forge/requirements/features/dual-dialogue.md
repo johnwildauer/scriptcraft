@@ -42,5 +42,9 @@ For AC-WRITING-013.9–013.11, only the exact Dialogue capability gives `Alts` i
 
 ## Related documents
 
+### Alt Dialogue projection boundary
+
+The opaque-only alternate-data wording in AC-WRITING-013.3, AC-WRITING-013.9, and AC-WRITING-013.10 is superseded only for supported direct Alts on exact Dialogue-capability owners by [Alt Dialogue requirements](alt-dialogue.md). Supported variants use the owner’s semantic Current/AltId projection, including on supported dual members; inactive variants remain outside nested screenplay text, selection, layout, pagination, and exports. Unsupported or orphaned alternate source remains opaque and retained. Dual membership, wrapper ownership, and the existing orphan and dormant-Type behavior are otherwise unchanged.
+
 - **Product overview:** [`../product-overview.md`](../product-overview.md)
 - **Technical blueprint:** [`../../blueprints/technical-context.md`](../../blueprints/technical-context.md)

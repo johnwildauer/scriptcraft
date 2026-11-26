@@ -89,6 +89,9 @@ impl ScriptCraftApp {
                 | Command::BeatBoardStyleToggle { .. } | Command::BeatBoardStyleClear
                 | Command::BeatBoardRunFormattingSet { .. }) =>
                 self.execute_editor(&command, RevealIntent::None, ctx),
+            command @ (Command::EditorDialogueAltAdd | Command::EditorDialogueAltDelete
+                | Command::EditorDialogueAltNavigate { .. }) =>
+                self.execute_editor(&command, RevealIntent::None, ctx),
             command @ (Command::ScriptNoteCreate { .. } | Command::ScriptNoteDelete { .. }
                 | Command::ScriptNotePropertiesSet { .. } | Command::ScriptNoteSelectionSet { .. }
                 | Command::ScriptNoteTextEdit { .. } | Command::ScriptNoteTextNavigate { .. }
@@ -276,6 +279,16 @@ impl ScriptCraftApp {
         // Defense in depth for stale/direct editor calls that bypass command
         // availability after a replacement handoff has engaged the lock.
         if self.replacement_open_pending() {
+            if self.development_mode
+                && matches!(
+                    command.id(),
+                    CommandId::EditorDialogueAltAdd
+                        | CommandId::EditorDialogueAltDelete
+                        | CommandId::EditorDialogueAltNavigate
+                )
+            {
+                self.responsiveness.record_alt_unavailable();
+            }
             return DesktopCommandOutcome::Unavailable(DesktopUnavailableReason::ModalBlocked);
         }
         let edit_input_started = (self.development_mode
@@ -292,6 +305,16 @@ impl ScriptCraftApp {
         }
         let executor_started = self.development_mode.then(std::time::Instant::now);
         let outcome = execute_editor_command_on_surface(&mut self.session, command, active_surface);
+        if self.development_mode
+            && matches!(
+                command.id(),
+                CommandId::EditorDialogueAltAdd
+                    | CommandId::EditorDialogueAltDelete
+                    | CommandId::EditorDialogueAltNavigate
+            )
+        {
+            self.responsiveness.record_alt_outcome(&outcome);
+        }
         let executor_duration = executor_started.map(|started| started.elapsed());
         let mutation_diagnostics = if self.development_mode {
             self.session.take_mutation_diagnostics()

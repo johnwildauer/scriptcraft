@@ -1,4 +1,5 @@
 mod caret;
+mod alt_dialogue_overlay;
 mod context_menu;
 mod frame;
 mod invisibles;

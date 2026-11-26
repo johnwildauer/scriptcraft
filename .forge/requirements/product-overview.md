@@ -16,6 +16,8 @@ Writers can create a new document from the Screenplay, Stageplay, or Dramatists 
 
 Writers can attach private ScriptNotes to selected screenplay Body text or a caret, revisit those notes from the page margin, and edit their titles, rich-text bodies, colors, and types. Notes remain annotations rather than screenplay content and are excluded from screenplay pagination and exports. See [ScriptNotes](features/script-notes.md).
 
+Writers can keep alternate Dialogue wording on its existing screenplay paragraph, switch the active version while editing, and preserve supported variants in the native document. Only the current version enters ordinary screenplay output; see [Alt Dialogue](features/alt-dialogue.md).
+
 ## Success outcomes
 
 - Writers can move from creating a screenplay to revising, saving, reopening, and sharing it in one focused workflow.
@@ -40,6 +42,7 @@ Writers can attach private ScriptNotes to selected screenplay Body text or a car
 - [Desktop workspace](features/desktop-workspace.md) — the desktop environment for working with a screenplay.
 - [User settings](features/user-settings.md) — persistent global appearance, default-template, ruler-visibility, and main/Title Page toolbar-composition preferences.
 - [Dual dialogue](features/dual-dialogue.md) — write and present paired dialogue.
+- [Alt Dialogue](features/alt-dialogue.md) — author and navigate owner-bound alternate Dialogue variants.
 - [Beat Board](features/beat-board.md) — organize independent rich-text cards on a finite board.
 - [ScriptNotes](features/script-notes.md) — annotate screenplay Body ranges without changing screenplay output.
 - [Fountain conversion](features/fountain-conversion.md) — bring Fountain screenplay text into ScriptCraft.

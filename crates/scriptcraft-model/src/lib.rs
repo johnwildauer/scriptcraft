@@ -6,6 +6,7 @@
 pub mod beat_board;
 pub mod body_offsets;
 pub mod cast_list;
+pub mod dialogue_alts;
 pub mod dual_dialogue;
 pub mod element;
 pub mod element_definition;
@@ -37,6 +38,10 @@ pub use body_offsets::{
     selection_to_flat_offsets,
 };
 pub use dual_dialogue::DualDialogueError;
+pub use dialogue_alts::{
+    DialogueAltAddIds, DialogueAltDirection, DialogueAltEdit, DialogueAltError, DialogueAltId,
+    DialogueAltIdParseError, DialogueAlternative, DialogueAlternatives,
+};
 pub use element::{
     BodyOwner, RunAttribute, ScreenplayElement, SourceFormat, SourceProvenance, SourceSection,
     TextRun,

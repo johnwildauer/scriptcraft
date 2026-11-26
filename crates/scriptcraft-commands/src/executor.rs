@@ -106,6 +106,34 @@ pub fn execute_editor_command_on_surface(
         }
     }
 
+    let dialogue_alt_direction = match command {
+        Command::EditorDialogueAltAdd | Command::EditorDialogueAltDelete => None,
+        Command::EditorDialogueAltNavigate { direction } => Some(*direction),
+        _ => None,
+    };
+
+    if matches!(command, Command::EditorDialogueAltAdd | Command::EditorDialogueAltDelete | Command::EditorDialogueAltNavigate { .. }) {
+        if active_surface != EditorSurface::Body {
+            return CommandOutcome::Unavailable(UnavailableReason::Selection);
+        }
+        let Some(target) = session.dialogue_alt_target() else {
+            return CommandOutcome::Unavailable(UnavailableReason::Selection);
+        };
+        let eligible = match command {
+            Command::EditorDialogueAltAdd => target.can_add,
+            Command::EditorDialogueAltDelete => target.can_delete,
+            Command::EditorDialogueAltNavigate { .. } => match dialogue_alt_direction {
+                Some(crate::HorizontalDirection::Left) => target.can_previous,
+                Some(crate::HorizontalDirection::Right) => target.can_next,
+                None => false,
+            },
+            _ => false,
+        };
+        if !eligible {
+            return CommandOutcome::Unavailable(UnavailableReason::Selection);
+        }
+    }
+
     if let Command::FormatTemplateApply { template } = command {
         return match session.apply_builtin_template(crate::builtin_template_id(*template)) {
             Ok(ApplyTemplateOutcome::Changed) => CommandOutcome::Changed,
@@ -253,6 +281,27 @@ pub fn execute_editor_command_on_surface(
                 return CommandOutcome::Unavailable(UnavailableReason::Selection);
             }
             session.set_script_note_run_formatting(patch.as_core(), modified.as_str().to_owned())
+        }
+        Command::EditorDialogueAltAdd => match session.add_dialogue_alt() {
+            Ok(true) => Ok(()),
+            Ok(false) => return CommandOutcome::Unavailable(UnavailableReason::Selection),
+            Err(error) => Err(error),
+        },
+        Command::EditorDialogueAltDelete => match session.delete_dialogue_alt() {
+            Ok(true) => Ok(()),
+            Ok(false) => return CommandOutcome::Unavailable(UnavailableReason::Selection),
+            Err(error) => Err(error),
+        },
+        Command::EditorDialogueAltNavigate { direction } => {
+            let direction = match direction {
+                crate::HorizontalDirection::Left => scriptcraft_model::dialogue_alts::DialogueAltDirection::Previous,
+                crate::HorizontalDirection::Right => scriptcraft_model::dialogue_alts::DialogueAltDirection::Next,
+            };
+            match session.navigate_dialogue_alt(direction) {
+                Ok(true) => Ok(()),
+                Ok(false) => return CommandOutcome::Unavailable(UnavailableReason::Selection),
+                Err(error) => Err(error),
+            }
         }
         Command::ScriptNotePresent { .. } | Command::ScriptNoteDismiss => {
             return rejected(command);

@@ -119,6 +119,71 @@ pub(super) fn element_at_path_mut<'a>(
 }
 
 impl PreservationState {
+    /// Scans all retained source for exact numeric Alt identities, including
+    /// unsupported inline values and orphaned AltCollection entries. Invalid or
+    /// nonnumeric spellings remain source-owned and do not affect the maximum.
+    pub fn max_numeric_dialogue_alt_id(&self) -> Option<u64> {
+        fn decimal(value: &str, maximum: &mut Option<u64>) {
+            if let Some(value) = crate::dialogue_alts::DialogueAltId::parse_decimal(value)
+                .map(crate::dialogue_alts::DialogueAltId::value)
+            {
+                let should_replace = match *maximum {
+                    Some(current) => value > current,
+                    None => true,
+                };
+                if should_replace {
+                    *maximum = Some(value);
+                }
+            }
+        }
+
+        fn visit(nodes: &[PreservedNode], maximum: &mut Option<u64>) {
+            for node in nodes {
+                let PreservedNode::Element(element) = node else {
+                    continue;
+                };
+                if element.name.local_name == "Alts" {
+                    for attribute in &element.attributes {
+                        if attribute.name.local_name == "Current" {
+                            decimal(&attribute.value, maximum);
+                        }
+                    }
+                }
+                if element.name.local_name == "Alt" {
+                    for attribute in &element.attributes {
+                        if matches!(attribute.name.local_name.as_str(), "Id" | "AltId") {
+                            decimal(&attribute.value, maximum);
+                        }
+                    }
+                }
+                if element.name.local_name == "AltId" {
+                    for attribute in &element.attributes {
+                        if attribute.name.local_name == "AltId" {
+                            decimal(&attribute.value, maximum);
+                        }
+                    }
+                    let mut text = String::new();
+                    for child in &element.children {
+                        match child {
+                            PreservedNode::Text(value) | PreservedNode::CData(value) => {
+                                text.push_str(value);
+                            }
+                            _ => {}
+                        }
+                    }
+                    decimal(&text, maximum);
+                }
+                visit(&element.children, maximum);
+            }
+        }
+
+        let mut maximum = None;
+        for section in &self.sections {
+            visit(&section.children, &mut maximum);
+        }
+        maximum
+    }
+
     /// Returns the source anchor for the winning retained settings node of an
     /// exact document element key, if one is currently present.
     pub fn element_definition_anchor(

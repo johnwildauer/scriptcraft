@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ab_glyph::{Font, FontRef};
 use scriptcraft_model::typography::{
@@ -15,6 +16,16 @@ const MAX_DOCUMENT_FONT_REQUESTS: usize = MAX_FONT_REQUESTS;
 const MAX_PREPARATION_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PREPARED_ENVIRONMENTS: usize = 2;
 const HOST_CATALOG_GENERATION: u64 = 1;
+
+/// Value-free render-call observation. It contains no signature material or
+/// document values; miss preparation excludes signature calculation and hits.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DocumentFontPreparationObservation {
+    pub(crate) signature_duration: Duration,
+    pub(crate) cache_hit: bool,
+    pub(crate) miss_preparation_duration: Option<Duration>,
+    pub(crate) cache_clear_count: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FontPreparationError {
@@ -90,6 +101,10 @@ pub(super) struct DocumentFontPreparation {
     native_font_catalog: super::host_font_catalog::NativeFontCatalog,
     prepared_cache: HashMap<PreparationSignature, PreparedDocumentFonts>,
     catalog_generation: u64,
+    // Tracks the prior observed successful preparation, not every cache use.
+    // Starting at the host generation makes the first observation report only
+    // catalog invalidations that occur after this preparation state is created.
+    last_prepared_catalog_generation: u64,
 }
 
 impl Default for DocumentFontPreparation {
@@ -98,6 +113,7 @@ impl Default for DocumentFontPreparation {
             native_font_catalog: super::host_font_catalog::NativeFontCatalog::default(),
             prepared_cache: HashMap::new(),
             catalog_generation: HOST_CATALOG_GENERATION,
+            last_prepared_catalog_generation: HOST_CATALOG_GENERATION,
         }
     }
 }
@@ -110,14 +126,61 @@ impl DocumentFontPreparation {
         &mut self,
         project: &Project,
     ) -> Result<PreparedDocumentFonts, FontPreparationError> {
+        self.prepare_document_inner(project, false)
+            .map(|(prepared, _)| prepared)
+    }
+
+    pub(crate) fn prepare_document_observed(
+        &mut self,
+        project: &Project,
+    ) -> Result<(PreparedDocumentFonts, DocumentFontPreparationObservation), FontPreparationError>
+    {
+        let (prepared, observation) = self.prepare_document_inner(project, true)?;
+        Ok((
+            prepared,
+            observation.expect("observed preparation returns its observation"),
+        ))
+    }
+
+    fn prepare_document_inner(
+        &mut self,
+        project: &Project,
+        observe: bool,
+    ) -> Result<
+        (
+            PreparedDocumentFonts,
+            Option<DocumentFontPreparationObservation>,
+        ),
+        FontPreparationError,
+    > {
         let generation = self
             .catalog_generation
             .saturating_add(self.native_font_catalog.generation());
+        let catalog_invalidation_clear_count = if observe {
+            self.catalog_generation
+                .saturating_sub(self.last_prepared_catalog_generation)
+        } else {
+            0
+        };
+        let signature_started = observe.then(Instant::now);
         let signature = project_font_signature(project, generation)?;
-        if let Some(cached) = self.prepared_cache.get(&signature) {
-            return Ok(cached.clone());
+        let signature_duration = signature_started.map(|started| started.elapsed());
+        if let Some(cached) = self.prepared_cache.get(&signature).cloned() {
+            let observation = signature_duration.map(|signature_duration| {
+                DocumentFontPreparationObservation {
+                    signature_duration,
+                    cache_hit: true,
+                    miss_preparation_duration: None,
+                    cache_clear_count: catalog_invalidation_clear_count,
+                }
+            });
+            if observation.is_some() {
+                self.last_prepared_catalog_generation = self.catalog_generation;
+            }
+            return Ok((cached, observation));
         }
 
+        let preparation_started = observe.then(Instant::now);
         let mut faces = BTreeMap::new();
         let mut face_bytes = BTreeMap::new();
         let mut face_indices = BTreeMap::new();
@@ -278,11 +341,25 @@ impl DocumentFontPreparation {
             fallback_faces,
             signature: signature.clone(),
         };
-        if self.prepared_cache.len() >= MAX_PREPARED_ENVIRONMENTS {
+        let cache_was_full = self.prepared_cache.len() >= MAX_PREPARED_ENVIRONMENTS;
+        let cache_clear_count = catalog_invalidation_clear_count
+            .saturating_add(if observe && cache_was_full { 1 } else { 0 });
+        if cache_was_full {
             self.prepared_cache.clear();
         }
         self.prepared_cache.insert(signature, prepared.clone());
-        Ok(prepared)
+        let observation = signature_duration.map(|signature_duration| {
+            DocumentFontPreparationObservation {
+                signature_duration,
+                cache_hit: false,
+                miss_preparation_duration: preparation_started.map(|started| started.elapsed()),
+                cache_clear_count,
+            }
+        });
+        if observation.is_some() {
+            self.last_prepared_catalog_generation = self.catalog_generation;
+        }
+        Ok((prepared, observation))
     }
 
     pub(crate) fn invalidate_catalog(&mut self) {

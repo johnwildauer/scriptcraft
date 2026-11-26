@@ -1,17 +1,20 @@
 //! Script View pointer hit testing and selection activation.
 
 use super::{page_policy::screen_y_to_document, ScriptCraftApp};
+use super::alt_dialogue_overlay::{
+    hovered_control as alt_control_at, AltOverlayAction, AltOverlayGeometry,
+};
 use crate::chrome::status_bar::PresentedPage;
 use crate::commands::CommandInvocation;
 use crate::presentation::geometry as presentation_geometry;
 use eframe::egui;
 use scriptcraft_commands::{
-    Command, CommandOrigin, EditorSurface, PointerPhase, ScriptNoteIdValue,
+    Command, CommandOrigin, EditorSurface, HorizontalDirection, PointerPhase, ScriptNoteIdValue,
     ScriptNotePresentValue,
 };
 use scriptcraft_layout::{InteractionQueryDiagnostics, ScreenplayLayout};
 use scriptcraft_model::formatting::FixedPoint;
-use scriptcraft_session::editing::Position;
+use scriptcraft_session::editing::{Position, Selection};
 use std::time::Instant;
 
 use super::note_overlay::{marker_at, NoteMarkerGeometry};
@@ -128,6 +131,7 @@ impl ScriptCraftApp {
         projections: &[Option<Vec<Option<presentation_geometry::PresentationLine<'_>>>>],
         surface: EditorSurface,
         note_markers: &[NoteMarkerGeometry],
+        alt_controls: &[AltOverlayGeometry],
     ) {
         match surface {
             EditorSurface::Body => self.editor_surface_id = Some(editor_id),
@@ -146,6 +150,120 @@ impl ScriptCraftApp {
             self.reconcile_body_active_group();
         }
         let pointer = response.interact_pointer_pos();
+        let alt_hit_current = (surface == EditorSurface::Body
+            && layout.purpose == scriptcraft_layout::LayoutPurpose::Editor)
+            .then(|| pointer.and_then(|position| alt_control_at(alt_controls, Some(position))))
+            .flatten();
+        let alt_hit_origin = (surface == EditorSurface::Body
+            && layout.purpose == scriptcraft_layout::LayoutPurpose::Editor)
+            .then(|| {
+                ui.input(|input| input.pointer.press_origin())
+                    .and_then(|origin| alt_control_at(alt_controls, Some(origin)))
+            })
+            .flatten();
+        let alt_pointer_action = response.clicked()
+            || response.secondary_clicked()
+            || response.double_clicked()
+            || response.triple_clicked()
+            || response.drag_started()
+            || response.dragged()
+            || (response.hovered() && ui.input(|input| input.pointer.primary_down()));
+        if (alt_hit_current.is_some() || alt_hit_origin.is_some()) && alt_pointer_action {
+            if self.development_mode {
+                if response.clicked_by(egui::PointerButton::Primary) {
+                    let classification = if response.triple_clicked() {
+                        crate::app::responsiveness::AltPointerClass::Triple
+                    } else if response.double_clicked() {
+                        crate::app::responsiveness::AltPointerClass::Double
+                    } else {
+                        crate::app::responsiveness::AltPointerClass::Ordinary
+                    };
+                    self.responsiveness
+                        .record_alt_pointer_classification(classification);
+                }
+            }
+            if response.clicked_by(egui::PointerButton::Primary) {
+                if let Some(action) = alt_hit_current {
+                    match action {
+                    AltOverlayAction::Add => {
+                        if self.development_mode {
+                            self.responsiveness.record_alt_pointer_submitted();
+                        }
+                        self.dispatch_command(
+                            CommandInvocation::new(
+                                Command::EditorDialogueAltAdd,
+                                CommandOrigin::Pointer,
+                            ),
+                            ui.ctx(),
+                        );
+                    }
+                    AltOverlayAction::Delete => {
+                        if self.development_mode {
+                            self.responsiveness.record_alt_pointer_submitted();
+                        }
+                        self.dispatch_command(
+                            CommandInvocation::new(
+                                Command::EditorDialogueAltDelete,
+                                CommandOrigin::Pointer,
+                            ),
+                            ui.ctx(),
+                        );
+                    }
+                    AltOverlayAction::Previous | AltOverlayAction::Next => {
+                        if self.development_mode {
+                            self.responsiveness.record_alt_pointer_submitted();
+                        }
+                        let direction = if action == AltOverlayAction::Previous {
+                            HorizontalDirection::Left
+                        } else {
+                            HorizontalDirection::Right
+                        };
+                        self.dispatch_command(
+                            CommandInvocation::new(
+                                Command::EditorDialogueAltNavigate { direction },
+                                CommandOrigin::Pointer,
+                            ),
+                            ui.ctx(),
+                        );
+                    }
+                    AltOverlayAction::FocusAtTextEnd {
+                        element_index,
+                        text_end,
+                    } => {
+                        self.set_active_editor_surface(EditorSurface::Body);
+                        self.dispatch_command(
+                            CommandInvocation::new(
+                                Command::EditorFocus,
+                                CommandOrigin::Pointer,
+                            ),
+                            ui.ctx(),
+                        );
+                        let position = Position {
+                            element: element_index,
+                            offset: text_end,
+                        };
+                        let selection = Selection {
+                            anchor: position,
+                            focus: position,
+                        };
+                        if let Ok(selection) = scriptcraft_commands::Selection::from_core(selection) {
+                            self.dispatch_command(
+                                CommandInvocation::new(
+                                    Command::EditorSelectionSet {
+                                        selection,
+                                        surface: EditorSurface::Body,
+                                    },
+                                    CommandOrigin::Pointer,
+                                ),
+                                ui.ctx(),
+                            );
+                        }
+                    }
+                    }
+                }
+            }
+            return;
+        }
         let marker_hit = (surface == EditorSurface::Body
             && layout.purpose == scriptcraft_layout::LayoutPurpose::Editor)
             .then(|| pointer.and_then(|position| marker_at(note_markers, position)))

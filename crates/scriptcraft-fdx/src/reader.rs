@@ -269,6 +269,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     }
     preservation.rebuild_indexes();
     project.preservation = Some(preservation);
+    crate::dialogue_alts::import(root, &mut project);
     let preservation = project
         .preservation
         .as_mut()

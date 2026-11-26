@@ -413,7 +413,6 @@ fn validate_nested_member_topology(
     element_type: &ElementTypeKey,
 ) -> Result<(), FdxError> {
     let capabilities = SemanticCapabilities::for_key(element_type);
-    let mut saw_alts = false;
     let mut saw_attachment = false;
     for child in &element.children {
         match child {
@@ -430,10 +429,8 @@ fn validate_nested_member_topology(
             RawNode::Element(child)
                 if capabilities.dialogue && is_fdx_element(child, "Alts", root_ns) =>
             {
-                if saw_alts {
-                    return Err(FdxError::UnsupportedConstruct);
-                }
-                saw_alts = true;
+                // Alt source is semantically imported only when its shape is
+                // unambiguous. Retain malformed/duplicate children opaquely.
             }
             RawNode::Element(child) if is_user_paragraph_data_name(&child.name, &element.name) => {
                 if saw_attachment {

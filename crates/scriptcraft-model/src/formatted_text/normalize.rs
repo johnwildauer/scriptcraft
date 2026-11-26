@@ -2,10 +2,12 @@
 
 use super::runs::{parse_style_attribute, FormattedTextError, RunStyle};
 use crate::{
+    dialogue_alts::DialogueAlternative,
     element::{
         BodyOwner, RunAttribute, TextRun, MAX_RUN_ATTRIBUTES, MAX_RUN_ATTRIBUTE_BYTES,
         MAX_RUNS_PER_ELEMENT,
     },
+    element_definition::ElementDefinition,
     formatting::FixedPoint,
     Project,
     MAX_TEXT_BYTES,
@@ -222,14 +224,132 @@ pub fn normalize_runs(
     Ok(normalized)
 }
 
+/// Returns complete Text defaults in the established AltCollection attribute
+/// order. Color is present only when the Dialogue definition owns a color.
+pub fn dialogue_default_run_attributes(definition: &ElementDefinition) -> Vec<RunAttribute> {
+    let font = &definition.font;
+    let style = [
+        (font.bold, "Bold"),
+        (font.italic, "Italic"),
+        (font.underline, "Underline"),
+        (font.all_caps, "AllCaps"),
+        (font.hidden_text, "HiddenText"),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, token)| enabled.then_some(token))
+    .collect::<Vec<_>>()
+    .join("+");
+    let mut attributes = vec![
+        RunAttribute { name: "AdornmentStyle".into(), value: font.adornment_style.to_string() },
+        RunAttribute { name: "Font".into(), value: font.family.clone() },
+        RunAttribute { name: "RevisionID".into(), value: font.revision_id.to_string() },
+        RunAttribute { name: "Size".into(), value: font.size.to_string() },
+        RunAttribute { name: "Style".into(), value: style },
+    ];
+    if let Some(color) = &font.color {
+        attributes.push(RunAttribute { name: "Color".into(), value: color.clone() });
+    }
+    attributes
+}
+
+/// Projects owner/canonical Text runs into the sparse semantic Alt form.
+/// Known defaults are removed only on exact effective-value equality.
+pub fn sparse_alt_run_projection(
+    definition: &ElementDefinition,
+    canonical_text: &str,
+    runs: &[TextRun],
+) -> Result<Vec<TextRun>, FormattedTextError> {
+    let defaults = dialogue_default_run_attributes(definition);
+    let normalized = normalize_runs(canonical_text, runs)?;
+    let sparse = normalized
+        .into_iter()
+        .map(|mut run| {
+            run.attributes.retain(|attribute| {
+                !defaults.iter().any(|default| {
+                    default.name == attribute.name && default.value == attribute.value
+                })
+            });
+            run
+        })
+        .collect::<Vec<_>>();
+    normalize_runs(canonical_text, &sparse)
+}
+
+/// Materializes a sparse semantic Alt run using complete Dialogue Text
+/// defaults, overlaying actual attributes without losing unknown source data.
+pub fn complete_alt_run_projection(
+    definition: &ElementDefinition,
+    canonical_text: &str,
+    runs: &[TextRun],
+) -> Result<Vec<TextRun>, FormattedTextError> {
+    let sparse = sparse_alt_run_projection(definition, canonical_text, runs)?;
+    let defaults = dialogue_default_run_attributes(definition);
+    let mut complete = Vec::with_capacity(sparse.len());
+    for run in sparse {
+        let mut attributes = defaults.clone();
+        let mut replaced = std::collections::BTreeSet::new();
+        let mut trailing = Vec::new();
+        for actual in run.attributes {
+            if let Some(index) = attributes
+                .iter()
+                .position(|default| default.name == actual.name)
+            {
+                if replaced.insert(actual.name.clone()) {
+                    attributes[index] = actual;
+                } else {
+                    trailing.push(actual);
+                }
+            } else {
+                trailing.push(actual);
+            }
+        }
+        attributes.extend(trailing);
+        complete.push(TextRun { text: run.text, attributes });
+    }
+    normalize_runs(canonical_text, &complete)
+}
+
 /// Build a detached, whole-Project canonical run candidate and project it into
 /// retained managed Text nodes. The input Project and its shared Body owners
 /// are never mutated; callers publish or serialize only the returned candidate.
 pub fn normalize_project_runs(project: &Project) -> Result<Project, FormattedTextError> {
     let mut candidate = project.clone();
+    let dialogue_definition = candidate
+        .element_definitions()
+        .get_by_label("Dialogue")
+        .cloned();
     for owner in &mut candidate.elements {
         let normalized = normalize_runs(&owner.text, &owner.runs)?;
-        BodyOwner::update(owner, |element| element.runs = normalized);
+        let alternatives = owner
+            .dialogue_alternatives
+            .as_ref()
+            .map(|alternatives| {
+                alternatives
+                    .inactive
+                    .iter()
+                    .map(|alternative| {
+                        let runs = if let Some(definition) = &dialogue_definition {
+                            sparse_alt_run_projection(definition, &alternative.text, &alternative.runs)?
+                        } else {
+                            normalize_runs(&alternative.text, &alternative.runs)?
+                        };
+                        Ok(DialogueAlternative {
+                            id: alternative.id,
+                            text: alternative.text.clone(),
+                            runs,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, FormattedTextError>>()
+            })
+            .transpose()?;
+        BodyOwner::update(owner, |element| {
+            element.runs = normalized;
+            if let (Some(existing), Some(normalized)) =
+                (element.dialogue_alternatives.as_mut(), alternatives)
+            {
+                existing.inactive = normalized;
+            }
+        });
     }
     for paragraph in &mut candidate.title_page {
         paragraph.runs = normalize_runs(&paragraph.text, &paragraph.runs)?;

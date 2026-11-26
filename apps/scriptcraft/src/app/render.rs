@@ -85,12 +85,32 @@ impl ScriptCraftApp {
         if surface == EditorSurface::Body {
             self.reconcile_body_active_group();
         }
-        let prepared_fonts = self
-            .document_font_store
-            .prepare_document(self.session.project())
-            .map_err(|_| scriptcraft_layout::LayoutError {
-                kind: LayoutErrorKind::NoGeometry,
-            })?;
+        let (prepared_fonts, font_observation) = if self.development_mode {
+            let (prepared, observation) = self
+                .document_font_store
+                .prepare_document_observed(self.session.project())
+                .map_err(|_| scriptcraft_layout::LayoutError {
+                    kind: LayoutErrorKind::NoGeometry,
+                })?;
+            (prepared, Some(observation))
+        } else {
+            (
+                self.document_font_store
+                    .prepare_document(self.session.project())
+                    .map_err(|_| scriptcraft_layout::LayoutError {
+                        kind: LayoutErrorKind::NoGeometry,
+                    })?,
+                None,
+            )
+        };
+        if let Some(observation) = font_observation {
+            self.responsiveness.record_font_preparation(
+                observation.signature_duration,
+                observation.cache_hit,
+                observation.miss_preparation_duration,
+                observation.cache_clear_count,
+            );
+        }
         let layout_environment = LayoutEnvironment::new(
             self.session.layout_inputs().page_only(),
             prepared_fonts.environment.clone(),

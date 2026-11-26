@@ -155,6 +155,15 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     let layout_build_detail_summary = app
         .development_mode
         .then(|| app.responsiveness.layout_build_detail_summary());
+    let alt_outcome_summary = app
+        .development_mode
+        .then(|| app.responsiveness.alt_outcome_summary());
+    let alt_pointer_summary = app
+        .development_mode
+        .then(|| app.responsiveness.alt_pointer_summary());
+    let font_preparation_summary = app
+        .development_mode
+        .then(|| app.responsiveness.font_preparation_summary());
     if let Some(started) = diagnostics_calculation_started {
         app.responsiveness
             .record_diagnostics_calculation(started.elapsed());
@@ -173,6 +182,9 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         aligned_edit_update_summaries.as_ref(),
         aligned_edit_update_other_detail_summary.as_deref(),
         layout_build_detail_summary.as_deref(),
+        alt_outcome_summary.as_deref(),
+        alt_pointer_summary.as_deref(),
+        font_preparation_summary.as_deref(),
     ) {
         (
             Some(performance_summary),
@@ -181,6 +193,9 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
             Some(aligned_details),
             Some(aligned_edit_update_other_detail_summary),
             Some(layout_build_detail_summary),
+            Some(alt_outcome_summary),
+            Some(alt_pointer_summary),
+            Some(font_preparation_summary),
         ) => Some(DiagnosticProjection {
             performance_summary,
             phase_summary,
@@ -195,6 +210,9 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
             ],
             aligned_edit_update_other_detail_summary,
             layout_build_detail_summary,
+            alt_outcome_summary,
+            alt_pointer_summary,
+            font_preparation_summary,
             diagnostic_message: diagnostic_message.as_deref(),
         }),
         _ => None,

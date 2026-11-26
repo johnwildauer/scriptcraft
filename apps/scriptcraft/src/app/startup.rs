@@ -289,7 +289,7 @@ fn native_options(initial_title: &str) -> Result<eframe::NativeOptions, String> 
                 window_state.top as f32,
             ))
             .with_decorations(true)
-            .with_transparent(true)
+            .with_transparent(false)
             .with_title_shown(true)
             .with_titlebar_shown(true)
             .with_fullsize_content_view(false)

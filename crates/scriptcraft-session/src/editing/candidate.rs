@@ -452,11 +452,19 @@ fn normalize_reconciled_body_run_candidates(
         let id = candidate.elements[index].id.clone();
         let text = candidate.elements[index].text.clone();
         let runs = candidate.elements[index].runs.clone();
-        let unchanged = baseline
+        let baseline_element = baseline
             .elements
             .iter()
-            .find(|element| element.id == id)
-            .is_some_and(|element| element.text == text && element.runs == runs);
+            .find(|element| element.id == id);
+        let baseline_alt_state =
+            baseline_element.and_then(|element| element.dialogue_alternatives.clone());
+        let candidate_alt_state = candidate.elements[index].dialogue_alternatives.clone();
+        let alt_state_changed = baseline_element.is_some_and(|element| {
+            element.dialogue_alternatives != candidate_alt_state
+        });
+        let unchanged = baseline_element
+            .is_some_and(|element| element.text == text && element.runs == runs)
+            && !alt_state_changed;
         if unchanged {
             continue;
         }
@@ -468,9 +476,22 @@ fn normalize_reconciled_body_run_candidates(
         });
         if let Some(preservation) = candidate.preservation.as_mut() {
             if preservation.has_managed_element(&id) {
-                preservation
-                    .sync_managed_text_runs(&id, &text, &normalized)
-                    .map_err(EditError::Preservation)?;
+                if alt_state_changed {
+                    preservation
+                        .replace_managed_projection(&candidate.elements[index])
+                        .map_err(EditError::Preservation)?;
+                    preservation
+                        .reconcile_managed_dialogue_alts(
+                            &id,
+                            baseline_alt_state.as_ref(),
+                            candidate_alt_state.as_ref(),
+                        )
+                        .map_err(EditError::Preservation)?;
+                } else {
+                    preservation
+                        .sync_managed_text_runs(&id, &text, &normalized)
+                        .map_err(EditError::Preservation)?;
+                }
             } else if has_provenance {
                 return Err(EditError::Preservation(
                     scriptcraft_model::preservation::PreservationError::ManagedAnchorMissing,

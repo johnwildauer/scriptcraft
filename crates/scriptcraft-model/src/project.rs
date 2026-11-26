@@ -155,6 +155,31 @@ impl Project {
         Ok(())
     }
 
+    /// Installs candidate-local final ScriptNote range overrides after an ordinary
+    /// Body replacement. The complete staged collection is boundary-checked before
+    /// assignment; surrounding session validation still validates the full Project.
+    pub fn install_script_note_ranges_candidate(
+        &mut self,
+        replacements: &[(StableId, crate::script_notes::ScriptNoteRange)],
+    ) -> Result<(), ModelError> {
+        let document_len = crate::body_offsets::flat_document_len(self)
+            .ok_or(ModelError::InvalidNumber)?;
+        let notes = self
+            .script_notes
+            .with_replaced_ranges(replacements)
+            .ok_or(ModelError::InvalidNumber)?;
+        if notes.iter().any(|note| {
+            note.range.start() > note.range.end()
+                || note.range.end() > document_len
+                || crate::body_offsets::flat_offset_to_position(self, note.range.start()).is_none()
+                || crate::body_offsets::flat_offset_to_position(self, note.range.end()).is_none()
+        }) {
+            return Err(ModelError::InvalidNumber);
+        }
+        self.script_notes = notes;
+        Ok(())
+    }
+
     /// Returns the project's ordered definition registry.
     pub fn element_definitions(&self) -> &DocumentElementDefinitions {
         &self.element_definitions

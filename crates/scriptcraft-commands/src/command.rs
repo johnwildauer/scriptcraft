@@ -103,11 +103,14 @@ pub enum CommandId {
     ScriptNoteStyleToggle,
     ScriptNoteStyleClear,
     ScriptNoteRunFormattingSet,
+    EditorDialogueAltAdd,
+    EditorDialogueAltDelete,
+    EditorDialogueAltNavigate,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 86] = [
+    pub const ALL: [Self; 89] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -194,6 +197,9 @@ impl CommandId {
         Self::ScriptNoteStyleToggle,
         Self::ScriptNoteStyleClear,
         Self::ScriptNoteRunFormattingSet,
+        Self::EditorDialogueAltAdd,
+        Self::EditorDialogueAltDelete,
+        Self::EditorDialogueAltNavigate,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -284,6 +290,9 @@ impl CommandId {
             Self::ScriptNoteStyleToggle => "script-note.style.toggle",
             Self::ScriptNoteStyleClear => "script-note.style.clear",
             Self::ScriptNoteRunFormattingSet => "script-note.run-formatting.set",
+            Self::EditorDialogueAltAdd => "editor.dialogue-alt.add",
+            Self::EditorDialogueAltDelete => "editor.dialogue-alt.delete",
+            Self::EditorDialogueAltNavigate => "editor.dialogue-alt.navigate",
         }
     }
 }
@@ -563,6 +572,12 @@ pub enum Command {
     ScriptNoteStyleClear { modified: ScriptNoteTimestampValue },
     #[serde(rename = "script-note.run-formatting.set")]
     ScriptNoteRunFormattingSet { patch: RunFormattingPatchValue, modified: ScriptNoteTimestampValue },
+    #[serde(rename = "editor.dialogue-alt.add")]
+    EditorDialogueAltAdd,
+    #[serde(rename = "editor.dialogue-alt.delete")]
+    EditorDialogueAltDelete,
+    #[serde(rename = "editor.dialogue-alt.navigate")]
+    EditorDialogueAltNavigate { direction: HorizontalDirection },
 }
 
 impl Command {
@@ -682,6 +697,9 @@ impl Command {
             Self::ScriptNoteStyleToggle { .. } => CommandId::ScriptNoteStyleToggle,
             Self::ScriptNoteStyleClear { .. } => CommandId::ScriptNoteStyleClear,
             Self::ScriptNoteRunFormattingSet { .. } => CommandId::ScriptNoteRunFormattingSet,
+            Self::EditorDialogueAltAdd => CommandId::EditorDialogueAltAdd,
+            Self::EditorDialogueAltDelete => CommandId::EditorDialogueAltDelete,
+            Self::EditorDialogueAltNavigate { .. } => CommandId::EditorDialogueAltNavigate,
         }
     }
 }

@@ -41,3 +41,7 @@ Active dual columns use the same explicit resolved-font environment, per-scalar 
 - Represent dual dialogue as a bounded grouping over ordinary ordered elements, not a general nested-story editor.
 - Keep ordered source membership and wrapper provenance authoritative for the retained container; derive active sides from current types and allow a valid inactive container.
 - Keep active-group navigation state transient and isolate it from Print composition.
+
+## Alt Dialogue member projection
+
+The opaque-only sentence in the Dual Dialogue and alternates entry of [FDX preservation and storage](../components/fdx-preservation-and-storage.md) is superseded only for supported inline Alts on an exact Dialogue-capability member. The member’s Alt state belongs to its ordinary screenplay owner; the FDX reader resolves referenced copies through the first direct root AltCollection using both numeric ID and durable paragraph ID. Inactive variants do not become nested screenplay members or affect dual membership, selection, layout, or output. Unsupported shapes and retained orphan copies remain opaque under the existing source policy. See [Alt Dialogue blueprint](alt-dialogue.md) for the focused ownership map.

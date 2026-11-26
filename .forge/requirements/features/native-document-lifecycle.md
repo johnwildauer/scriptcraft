@@ -103,6 +103,10 @@ Before direct serialization or native Save/Save As, the detached output candidat
 
 For acknowledged in-app replacement Open, the parent process is the sole user-facing native-dialog owner for a failed child Open. The child retains its bounded terminal handoff and development diagnostic but suppresses its native dialog for that acknowledged path. Direct cold-start and independent-child failures retain child-local reporting. Migration Continue/Cancel and existing failure-safe activation behavior remain unchanged.
 
+### Alt Dialogue source projection
+
+For AC-WRITING-003.9, the opaque-only treatment of Alts and AltCollection is superseded only for a complete supported projection on an exact Dialogue-capability owner, as specified by [Alt Dialogue requirements](alt-dialogue.md). Supported inline Alts and entries in the first direct root AltCollection are managed semantic projections matched by numeric Alt ID and the owner’s exact durable paragraph ID; unsupported shapes remain opaque. Unreferenced and whole-owner-orphaned AltCollection entries remain retained. Existing detached-candidate, semantic reread, identity, normalized-source, destination-protection, and atomic-publication gates remain unchanged. This projection does not promise universal Final Draft compatibility.
+
 ## Constraints
 
 - Native FDX remains the semantic source of truth; transient view and history state do not replace it.

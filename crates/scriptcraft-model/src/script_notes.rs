@@ -246,6 +246,38 @@ impl ScriptNotes {
         &self.notes
     }
 
+    /// Returns a complete cloned collection with ranges replaced by stable note identity.
+    /// Every requested identity must resolve exactly once; source and creation order remain
+    /// unchanged, including when distinct notes receive the same range.
+    pub(crate) fn with_replaced_ranges(
+        &self,
+        replacements: &[(StableId, ScriptNoteRange)],
+    ) -> Option<Self> {
+        for (index, (id, _)) in replacements.iter().enumerate() {
+            if replacements[..index]
+                .iter()
+                .any(|(previous_id, _)| previous_id == id)
+                || self.notes.iter().filter(|note| &note.id == id).count() != 1
+            {
+                return None;
+            }
+        }
+        let mut notes = self.clone();
+        let mut applied = vec![false; replacements.len()];
+        for note in &mut notes.notes {
+            for (index, (id, range)) in replacements.iter().enumerate() {
+                if &note.id == id {
+                    if applied[index] {
+                        return None;
+                    }
+                    note.range = *range;
+                    applied[index] = true;
+                }
+            }
+        }
+        applied.iter().all(|was_applied| *was_applied).then_some(notes)
+    }
+
     /// Rebase all note ranges through one flattened Body replacement.
     ///
     /// Insertion at/before a nonzero start shifts both bounds; insertion strictly

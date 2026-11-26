@@ -30,6 +30,9 @@ pub(crate) struct AppCommandAvailability {
     pub(crate) note_formatting: bool,
     pub(crate) paragraph_formatting: bool,
     pub(crate) dual_dialogue_toggle: bool,
+    pub(crate) dialogue_alt_add: bool,
+    pub(crate) dialogue_alt_delete: bool,
+    pub(crate) dialogue_alt_navigate: bool,
     pub(crate) title_open: bool,
     pub(crate) title_close: bool,
     pub(crate) element_windows_available: bool,
@@ -60,6 +63,8 @@ struct AppCommandProjectionKey {
     session_mutation_token: u64,
     active_editor_surface: EditorSurface,
     root_document_view: RootDocumentView,
+    body_surface_focused: bool,
+    title_view_state_swapped: bool,
     beat_text_focused: bool,
     script_note_text_focused: bool,
     title_surface_focused: bool,
@@ -136,6 +141,8 @@ impl ScriptCraftApp {
             session_mutation_token: self.session.mutation_token(),
             active_editor_surface: self.active_editor_surface,
             root_document_view: self.root_document_view,
+            body_surface_focused: self.surface_focused,
+            title_view_state_swapped: self.title_view_state_swapped,
             beat_text_focused: self.beat_text.focused,
             script_note_text_focused: self.script_note_workspace.focused
                 && self.script_note_workspace.viewport_focused
@@ -416,6 +423,21 @@ impl ScriptCraftApp {
             && !migration_pending && !replacement_pending && !native_output_active
             && self.session.beat_selection_is_valid()
             && matches!(self.session.beat_selection(), scriptcraft_session::editing::BeatSelection::Card { .. });
+        let dialogue_alt_target = self.session.dialogue_alt_target();
+        let dialogue_alt_controls_available = self.root_document_view == RootDocumentView::Script
+            && self.active_editor_surface == EditorSurface::Body
+            && !self.title_view_state_swapped
+            && self.surface_focused
+            && !self.title_view.surface_focused
+            && !self.element_windows.owns_input()
+            && !(self.script_note_workspace.focused && self.script_note_workspace.viewport_focused)
+            && !migration_pending
+            && !replacement_pending
+            && !native_output_active;
+        let dialogue_alt_eligible = dialogue_alt_controls_available
+            && dialogue_alt_target.as_ref().is_some_and(|target| {
+                target.collapsed_dialogue_owner && target.inline_source_supported
+            });
 
         AppCommandAvailability {
             modal_blocked: migration_pending && !replacement_pending,
@@ -455,6 +477,12 @@ impl ScriptCraftApp {
             note_formatting: note_body_focus,
             paragraph_formatting: editor_available && self.active_editor_surface == EditorSurface::Body && valid_body_selection,
             dual_dialogue_toggle: false,
+            dialogue_alt_add: dialogue_alt_eligible
+                && dialogue_alt_target.as_ref().is_some_and(|target| target.can_add),
+            dialogue_alt_delete: dialogue_alt_eligible
+                && dialogue_alt_target.as_ref().is_some_and(|target| target.can_delete),
+            dialogue_alt_navigate: dialogue_alt_eligible
+                && dialogue_alt_target.as_ref().is_some_and(|target| target.can_previous && target.can_next),
             // In-app Open is a selected-path replacement request and is blocked
             // while the current document is resolving another lifecycle gate.
             title_open: !migration_pending
@@ -583,6 +611,9 @@ impl AppCommandAvailability {
             CommandId::EditorRunFormattingSet => if self.note_text_focus { self.note_formatting } else { self.run_formatting || self.beat_formatting },
             CommandId::EditorParagraphFormattingSet => self.paragraph_formatting,
             CommandId::EditorDualDialogueToggle => self.dual_dialogue_toggle,
+            CommandId::EditorDialogueAltAdd => self.dialogue_alt_add,
+            CommandId::EditorDialogueAltDelete => self.dialogue_alt_delete,
+            CommandId::EditorDialogueAltNavigate => self.dialogue_alt_navigate,
             CommandId::WindowTitlePageOpen => self.title_open,
             CommandId::WindowTitlePageClose => self.title_close,
             CommandId::FormatElementsOpen => {
@@ -625,6 +656,9 @@ impl AppCommandAvailability {
             }
             CommandId::EditorElementChange
             | CommandId::EditorDualDialogueToggle
+            | CommandId::EditorDialogueAltAdd
+            | CommandId::EditorDialogueAltDelete
+            | CommandId::EditorDialogueAltNavigate
             | CommandId::EditorRunFormattingSet
             | CommandId::EditorParagraphFormattingSet
             | CommandId::ScriptNoteCreate | CommandId::ScriptNoteDelete

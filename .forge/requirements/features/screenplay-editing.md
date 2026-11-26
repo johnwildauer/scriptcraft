@@ -99,5 +99,9 @@ The separate Beat Board uses the same canonical UTF-8 and run-normalization prin
 
 ## Related documents
 
+### Alt Dialogue owner capability boundary
+
+The Alts portion of AC-WRITING-007.2’s generic attachment wording is narrowed by [Alt Dialogue requirements](alt-dialogue.md): supported semantic Alt state remains with its screenplay owner through Type changes, but authoring and overlay eligibility require the owner’s current exact Dialogue capability. State is dormant and has no overlay while that capability is absent, and becomes eligible again if it is restored. This does not change generic opaque attachment behavior or grant alternate semantics to unsupported source.
+
 - **Product overview:** [`../product-overview.md`](../product-overview.md)
 - **Technical blueprint:** [`../../blueprints/technical-context.md`](../../blueprints/technical-context.md)

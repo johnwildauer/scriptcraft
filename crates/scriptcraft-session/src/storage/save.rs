@@ -447,6 +447,29 @@ impl EditingSession {
             }
         };
         project.share_unchanged_body_owners_from(self.project());
+        // FDX deliberately keeps Alts on non-Dialogue owners opaque. Preserve
+        // the dormant semantic value through this owner-based reread rebase.
+        for old_owner in candidate.elements.iter().filter(|owner| {
+            owner.dialogue_alternatives.is_some()
+                && !candidate
+                    .element_semantics(&owner.element_type())
+                    .is_some_and(|semantics| semantics.capabilities().dialogue)
+        }) {
+            let mapped_id = map_body_owner_identity(candidate, &old_owner.id, &project)
+                .ok_or(EditError::InvalidSelection)?
+                .id
+                .clone();
+            let Some(index) = project
+                .elements
+                .iter()
+                .position(|owner| owner.id == mapped_id)
+            else {
+                return Err(EditError::InvalidSelection);
+            };
+            BodyOwner::update(&mut project.elements[index], |owner| {
+                owner.dialogue_alternatives = old_owner.dialogue_alternatives.clone();
+            });
+        }
         if let Some(preservation) = project.preservation.as_mut() {
             preservation.rebuild_indexes();
         }

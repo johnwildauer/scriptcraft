@@ -26,6 +26,12 @@ At the user's explicit direction, adapt and record project-policy changes in the
 - **Technical composition:** [ScriptNotes blueprint](blueprints/features/script-notes.md), with the current integration map in [technical context](blueprints/technical-context.md).
 - **Execution and user handoff:** [ScriptNotes work-order plan](../.plan/2026-11-25-script-notes/work-orders/README.md); [unchecked, user-owned review worksheet](../.plan/2026-11-25-script-notes/final-user-review.md). The worksheet is unexecuted and is not acceptance evidence.
 
+## Alt Dialogue initiative
+
+- **User-facing behavior:** [Alt Dialogue requirements](requirements/features/alt-dialogue.md), alongside the linked screenplay-editing, dual-dialogue, and native-document lifecycle boundaries.
+- **Technical composition:** [Alt Dialogue blueprint](blueprints/features/alt-dialogue.md), with the current source map in [technical context](blueprints/technical-context.md).
+- **Execution and user handoff:** [Alt Dialogue execution guide](../.plan/2026-11-26-alt-dialogue/investigation.md); [unchecked, user-owned review worksheet](../.plan/2026-11-26-alt-dialogue/final-user-review.md). The worksheet is a handoff, not evidence.
+
 ## Core boundaries
 
 - **Requirements** describe durable desired product behavior: what users and stakeholders need and why. Cohesive area files may group related capabilities and retain stable requirement/acceptance IDs; they do not prescribe internal implementation or carry lifecycle status, implementation evidence, progress, or history.

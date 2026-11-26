@@ -16,6 +16,8 @@ mod content;
 mod context;
 mod diagnostics;
 mod document;
+mod dialogue_alts;
+mod dialogue_alts_output;
 mod element_settings;
 mod element_settings_import;
 mod element_settings_serialization;

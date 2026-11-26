@@ -478,6 +478,68 @@ struct PageGauges {
     total: usize,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct AltOutcomeCounts {
+    availability_rejected: u64,
+    changed: u64,
+    no_op: u64,
+    unavailable: u64,
+    rejected: u64,
+    failed: u64,
+    preservation_failures: u64,
+    formatted_model_failures: u64,
+    other_failures: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct AltPointerCounts {
+    ordinary: u64,
+    double: u64,
+    triple: u64,
+    submitted: u64,
+}
+
+#[derive(Default)]
+struct FontPreparationDiagnostics {
+    signature_durations: DurationHistory,
+    miss_preparation_durations: DurationHistory,
+    hits: u64,
+    misses: u64,
+    cache_clears: u64,
+}
+
+impl FontPreparationDiagnostics {
+    fn record(
+        &mut self,
+        signature_duration: Duration,
+        cache_hit: bool,
+        miss_preparation_duration: Option<Duration>,
+        cache_clear_count: u64,
+    ) {
+        self.signature_durations.push(signature_duration);
+        if cache_hit {
+            self.hits = self.hits.saturating_add(1);
+        } else {
+            self.misses = self.misses.saturating_add(1);
+            if let Some(duration) = miss_preparation_duration {
+                self.miss_preparation_durations.push(duration);
+            }
+        }
+        self.cache_clears = self
+            .cache_clears
+            .saturating_add(cache_clear_count);
+    }
+
+    fn summary(&self) -> String {
+        let signature = format_optional_duration_summary(&self.signature_durations);
+        let preparation = format_optional_duration_summary(&self.miss_preparation_durations);
+        format!(
+            "Font prep ms avg/p95/max | Signature {signature} | Miss-only {preparation} | Hits/misses/clears {}/{}/{}",
+            self.hits, self.misses, self.cache_clears
+        )
+    }
+}
+
 pub(crate) struct ResponsivenessDiagnostics {
     update_observations: UpdateObservationWindow,
     update_durations: DurationHistory,
@@ -490,6 +552,9 @@ pub(crate) struct ResponsivenessDiagnostics {
     page_paint_durations: DurationHistory,
     aligned_edit_updates: BoundedSampleWindow<AlignedEditUpdateSample>,
     layout_build_stages: BoundedSampleWindow<LayoutBuildStageSample>,
+    alt_outcomes: AltOutcomeCounts,
+    alt_pointer: AltPointerCounts,
+    font_preparation: FontPreparationDiagnostics,
     pending_edit: Option<PendingEditPaint>,
     current_update: Option<PendingAlignedUpdate>,
     active_surface: Option<EditorSurface>,
@@ -512,6 +577,9 @@ impl Default for ResponsivenessDiagnostics {
             page_paint_durations: DurationHistory::default(),
             aligned_edit_updates: BoundedSampleWindow::default(),
             layout_build_stages: BoundedSampleWindow::default(),
+            alt_outcomes: AltOutcomeCounts::default(),
+            alt_pointer: AltPointerCounts::default(),
+            font_preparation: FontPreparationDiagnostics::default(),
             pending_edit: None,
             current_update: None,
             active_surface: None,
@@ -715,6 +783,119 @@ impl ResponsivenessDiagnostics {
         observation: EditMutationDiagnostics,
     ) {
         self.command_detail.record(executor_duration, observation);
+    }
+
+    pub(crate) fn record_alt_availability_rejection(&mut self) {
+        self.alt_outcomes.availability_rejected =
+            self.alt_outcomes.availability_rejected.saturating_add(1);
+    }
+
+    pub(crate) fn record_alt_unavailable(&mut self) {
+        self.alt_outcomes.unavailable = self.alt_outcomes.unavailable.saturating_add(1);
+    }
+
+    pub(crate) fn record_alt_outcome(
+        &mut self,
+        outcome: &scriptcraft_commands::CommandOutcome,
+    ) {
+        use scriptcraft_commands::CommandOutcome;
+        match outcome {
+            CommandOutcome::Changed => {
+                self.alt_outcomes.changed = self.alt_outcomes.changed.saturating_add(1)
+            }
+            CommandOutcome::NoOp => {
+                self.alt_outcomes.no_op = self.alt_outcomes.no_op.saturating_add(1)
+            }
+            CommandOutcome::Unavailable(_) => self.record_alt_unavailable(),
+            CommandOutcome::Rejected(_) => {
+                self.alt_outcomes.rejected = self.alt_outcomes.rejected.saturating_add(1)
+            }
+            CommandOutcome::Failed(error) => {
+                self.alt_outcomes.failed = self.alt_outcomes.failed.saturating_add(1);
+                use scriptcraft_session::editing::EditError;
+                if matches!(
+                    error,
+                    EditError::Preservation(_)
+                        | EditError::Model(
+                            scriptcraft_model::error::ModelError::InvalidPreservationState(_)
+                        )
+                        | EditError::FormattedText(
+                            scriptcraft_model::formatted_text::FormattedTextError::Preservation(_)
+                        )
+                        | EditError::FormattedText(
+                            scriptcraft_model::formatted_text::FormattedTextError::Model(
+                                scriptcraft_model::error::ModelError::InvalidPreservationState(_)
+                            )
+                        )
+                ) {
+                    self.alt_outcomes.preservation_failures =
+                        self.alt_outcomes.preservation_failures.saturating_add(1);
+                } else if matches!(error, EditError::FormattedText(_) | EditError::Model(_)) {
+                    self.alt_outcomes.formatted_model_failures =
+                        self.alt_outcomes.formatted_model_failures.saturating_add(1);
+                } else {
+                    self.alt_outcomes.other_failures =
+                        self.alt_outcomes.other_failures.saturating_add(1);
+                }
+            }
+            CommandOutcome::ApplyTemplateFailed(_) => {}
+        }
+    }
+
+    pub(crate) fn record_alt_pointer_classification(&mut self, classification: AltPointerClass) {
+        let count = match classification {
+            AltPointerClass::Ordinary => &mut self.alt_pointer.ordinary,
+            AltPointerClass::Double => &mut self.alt_pointer.double,
+            AltPointerClass::Triple => &mut self.alt_pointer.triple,
+        };
+        *count = count.saturating_add(1);
+    }
+
+    pub(crate) fn record_alt_pointer_submitted(&mut self) {
+        self.alt_pointer.submitted = self.alt_pointer.submitted.saturating_add(1);
+    }
+
+    pub(crate) fn record_font_preparation(
+        &mut self,
+        signature_duration: Duration,
+        cache_hit: bool,
+        miss_preparation_duration: Option<Duration>,
+        cache_clear_count: u64,
+    ) {
+        self.font_preparation.record(
+            signature_duration,
+            cache_hit,
+            miss_preparation_duration,
+            cache_clear_count,
+        );
+    }
+
+    pub(crate) fn alt_outcome_summary(&self) -> String {
+        let counts = self.alt_outcomes;
+        format!(
+            "Alt outcomes | Changed/no-op/unavailable/rejected/failed {}/{}/{}/{}/{} | Availability rejected {} | Failure preserve/formatted-model/other {}/{}/{}",
+            counts.changed,
+            counts.no_op,
+            counts.unavailable,
+            counts.rejected,
+            counts.failed,
+            counts.availability_rejected,
+            counts.preservation_failures,
+            counts.formatted_model_failures,
+            counts.other_failures,
+        )
+    }
+
+    pub(crate) fn alt_pointer_summary(&self) -> String {
+        let counts = self.alt_pointer;
+        format!(
+            "Alt pointer | Ordinary/double/triple/submitted {}/{}/{}/{}",
+            counts.ordinary, counts.double, counts.triple, counts.submitted
+        )
+    }
+
+    pub(crate) fn font_preparation_summary(&self) -> String {
+        self.font_preparation.summary()
     }
 
     pub(crate) fn record_document_surface(
@@ -952,5 +1133,15 @@ pub(crate) fn is_text_editing_command(command: CommandId) -> bool {
             | CommandId::EditorDeleteBackward
             | CommandId::EditDelete
             | CommandId::EditorParagraphEnter
+            | CommandId::EditorDialogueAltAdd
+            | CommandId::EditorDialogueAltDelete
+            | CommandId::EditorDialogueAltNavigate
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AltPointerClass {
+    Ordinary,
+    Double,
+    Triple,
 }

@@ -30,6 +30,8 @@ mod rich_paragraph;
 mod beat_board;
 pub use beat_board::{BeatHorizontalDirection, BeatLineEdge, BeatSelection, BeatTextEditOperation, BeatTextField, BeatTextPosition};
 mod candidate;
+mod dialogue_alts;
+pub use dialogue_alts::DialogueAltTarget;
 mod diagnostics;
 pub use diagnostics::EditMutationDiagnostics;
 mod apply_template;

@@ -268,6 +268,8 @@ pub(crate) fn same_semantic_elements(
         && left.iter().zip(right).all(|(left, right)| {
             left.element_type() == right.element_type()
                 && left.text == right.text
+                && (!scriptcraft_model::SemanticCapabilities::for_key(&left.element_type()).dialogue
+                    || left.dialogue_alternatives == right.dialogue_alternatives)
                 && if left.runs.is_empty() {
                     right.runs.iter().all(|run| run.attributes.is_empty())
                 } else {
@@ -620,7 +622,87 @@ pub(crate) fn validate_project_output_budgets(project: &Project) -> Result<(), F
             return Err(FdxError::ResourceLimit);
         }
     }
-    if payload_bytes > MAX_SOURCE_BYTES { return Err(FdxError::ResourceLimit); }
+    if project.elements.iter().any(|owner| owner.dialogue_alternatives.as_ref()
+        .is_some_and(|alternatives| !alternatives.inactive.is_empty()))
+    {
+        event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+    }
+    for owner in &project.elements {
+        let Some(alternatives) = &owner.dialogue_alternatives else { continue };
+        event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+        let current = alternatives.current.to_string();
+        if current.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES { return Err(FdxError::ResourceLimit); }
+        validate_xml_chars(&current)?;
+        payload_bytes = payload_bytes.checked_add("Current".len()).and_then(|bytes| bytes.checked_add(current.len()))
+            .ok_or(FdxError::ResourceLimit)?;
+        event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+        let definition = project.element_definitions().get(&owner.element_type())
+            .filter(|definition| definition.capabilities().dialogue)
+            .or_else(|| project.element_definitions().iter().find(|definition| definition.key.as_str() == "Dialogue"));
+        for alternative in &alternatives.inactive {
+            let id = alternative.id.to_string();
+            if id.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES { return Err(FdxError::ResourceLimit); }
+            validate_xml_chars(&id)?;
+            // The numeric ID appears once on Alt and once inline. Account for
+            // both values, their nodes, and the fixed Paragraph boilerplate.
+            payload_bytes = payload_bytes.checked_add("Id".len()).and_then(|bytes| bytes.checked_add(id.len()))
+                .and_then(|bytes| bytes.checked_add(id.len()))
+                .ok_or(FdxError::ResourceLimit)?;
+            text_bytes = text_bytes.checked_add(id.len()).ok_or(FdxError::ResourceLimit)?;
+            event_count = event_count.checked_add(15).ok_or(FdxError::ResourceLimit)?;
+            for (name, value) in [
+                ("Alignment", "Left"), ("FirstIndent", "0.00"),
+                ("Leading", "Regular"), ("LeftIndent", "2.50"),
+                ("OutlineLevel", "1"), ("RightIndent", "-1.11"),
+                ("SpaceBefore", "0"), ("Spacing", "1"),
+                ("StartsNewPage", "No"),
+            ] {
+                payload_bytes = payload_bytes.checked_add(name.len()).and_then(|bytes| bytes.checked_add(value.len()))
+                    .ok_or(FdxError::ResourceLimit)?;
+            }
+            let durable_owner_id = owner.source_provenance.as_ref()
+                .and_then(|source| source.foreign_id.as_deref()).unwrap_or("00000000-0000-0000-0000-000000000000");
+            if durable_owner_id.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES { return Err(FdxError::ResourceLimit); }
+            validate_xml_chars(durable_owner_id)?;
+            payload_bytes = payload_bytes.checked_add("id".len())
+                .and_then(|bytes| bytes.checked_add(durable_owner_id.len()))
+                .ok_or(FdxError::ResourceLimit)?;
+            validate_xml_chars(&alternative.text)?;
+            text_bytes = text_bytes.checked_add(alternative.text.len()).ok_or(FdxError::ResourceLimit)?;
+            payload_bytes = payload_bytes.checked_add(alternative.text.len()).ok_or(FdxError::ResourceLimit)?;
+            let projected_runs = match definition {
+                Some(definition) if definition.capabilities().dialogue => {
+                    crate::dialogue_alts_output::complete_alt_output_runs(
+                        definition, &alternative.text, &alternative.runs,
+                    )?
+                }
+                _ => alternative.runs.clone(),
+            };
+            event_count = event_count.checked_add(projected_runs.len().max(usize::from(projected_runs.is_empty() && !alternative.text.is_empty())))
+                .ok_or(FdxError::ResourceLimit)?;
+            for run in &projected_runs {
+                if !run.text.is_empty() { event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?; }
+                if run.attributes.len() > MAX_ATTRIBUTES_PER_ELEMENT { return Err(FdxError::ResourceLimit); }
+                for attribute in &run.attributes {
+                    if attribute.name.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES
+                        || attribute.value.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES
+                    { return Err(FdxError::ResourceLimit); }
+                    validate_qname(&attribute.name)?;
+                    validate_xml_chars(&attribute.name)?;
+                    validate_xml_chars(&attribute.value)?;
+                    payload_bytes = payload_bytes.checked_add(attribute.name.len())
+                        .and_then(|size| size.checked_add(attribute.value.len()))
+                        .ok_or(FdxError::ResourceLimit)?;
+                    event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+                }
+            }
+            if text_bytes > MAX_SOURCE_TEXT_BYTES || payload_bytes > MAX_SOURCE_BYTES
+                || event_count > MAX_SOURCE_EVENTS { return Err(FdxError::ResourceLimit); }
+        }
+    }
+    if text_bytes > MAX_SOURCE_TEXT_BYTES || payload_bytes > MAX_SOURCE_BYTES
+        || event_count > MAX_SOURCE_EVENTS
+    { return Err(FdxError::ResourceLimit); }
     Ok(())
 }
 pub(crate) fn normalize_sections(sections: &[PreservedSection]) -> Vec<PreservedSection> {

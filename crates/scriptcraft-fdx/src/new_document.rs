@@ -11,7 +11,7 @@ use crate::window_state::window_state_element;
 use scriptcraft_model::paragraph_id::ParagraphIdAllocator;
 use scriptcraft_model::preservation::{ForeignIdDomain, PreservedNode};
 use scriptcraft_model::{BodyOwner, Project, SemanticCapabilities};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Serialize a complete Project without source-preservation input.
 ///
@@ -61,6 +61,7 @@ pub(crate) fn make_new_document_nodes(
     let mut reserved_paragraph_ids = lineage_ids;
     reserved_paragraph_ids.extend(project_source_paragraph_ids(project));
     let mut paragraph_ids = ParagraphIdAllocator::new(reserved_paragraph_ids);
+    let mut alt_owner_paragraph_ids = BTreeMap::new();
     let mut index = 0usize;
     while let Some(element) = project.elements.get(index) {
         if let Some(group) = project
@@ -104,12 +105,20 @@ pub(crate) fn make_new_document_nodes(
                     .element_definitions()
                     .get(&member.element_type())
                     .ok_or(FdxError::InvalidValue)?;
-                dual.children.push(new_paragraph(
+                let mut generated = new_paragraph(
                     member,
                     definition,
                     overrides,
                     &mut paragraph_ids,
-                )?);
+                )?;
+                if let PreservedNode::Element(paragraph) = &mut generated {
+                    crate::dialogue_alts_output::attach_generated_inline(paragraph, member)?;
+                    alt_owner_paragraph_ids.insert(
+                        member.id.clone(),
+                        crate::dialogue_alts_output::generated_paragraph_id(paragraph)?,
+                    );
+                }
+                dual.children.push(generated);
             }
             outer.children.push(PreservedNode::Element(dual));
             content.children.push(PreservedNode::Element(outer));
@@ -130,6 +139,13 @@ pub(crate) fn make_new_document_nodes(
             direct_overrides,
             &mut paragraph_ids,
         )?;
+        if let PreservedNode::Element(generated) = &mut paragraph {
+            crate::dialogue_alts_output::attach_generated_inline(generated, element)?;
+            alt_owner_paragraph_ids.insert(
+                element.id.clone(),
+                crate::dialogue_alts_output::generated_paragraph_id(generated)?,
+            );
+        }
         if has_capability(project, element, |capabilities| capabilities.scene_boundary) {
             let scene_end = project.elements[index + 1..]
                 .iter()
@@ -246,6 +262,11 @@ pub(crate) fn make_new_document_nodes(
             ],
         )));
     root.children.push(PreservedNode::Element(title_page));
+    crate::dialogue_alts_output::append_generated_collection(
+        &mut root,
+        project,
+        &alt_owner_paragraph_ids,
+    )?;
     crate::beat_board_output::append_generated_board(&mut root, project, context)?;
     crate::script_notes_output::append_generated_script_notes(&mut root, project)?;
     Ok(vec![PreservedNode::Element(root)])

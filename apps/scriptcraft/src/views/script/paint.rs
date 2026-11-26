@@ -1,6 +1,7 @@
 //! Script View page, selection, decoration, caret, and IME painting.
 
 use super::{
+    alt_dialogue_overlay::{paint_controls as paint_alt_controls, AltOverlayAction, AltOverlayGeometry},
     caret::{caret_blink_id, caret_blink_visible, viewport_caret_rect, CaretPresentation},
     page_policy::{
         document_y_to_screen, normal_view_page_bottom_rule_geometry,
@@ -123,6 +124,9 @@ impl ScriptCraftApp {
         presentation_mode: ScriptViewMode,
         note_markers: &[NoteMarkerGeometry],
         hovered_note_marker: Option<NoteLineKey>,
+        alt_controls: &[AltOverlayGeometry],
+        hovered_alt_control: Option<AltOverlayAction>,
+        editor_clip: egui::Rect,
     ) {
         let scale = metrics.scale;
         let page_rect = presented_page.rect;
@@ -510,6 +514,15 @@ impl ScriptCraftApp {
                 palette.text,
                 note_markers,
                 hovered_note_marker,
+            );
+            paint_alt_controls(
+                &painter,
+                page_rect,
+                editor_clip,
+                scale,
+                palette.subdued_text,
+                alt_controls,
+                hovered_alt_control,
             );
         }
 

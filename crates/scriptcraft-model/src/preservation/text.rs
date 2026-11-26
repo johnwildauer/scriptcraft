@@ -830,7 +830,16 @@ impl PreservationState {
         change_managed_type_attribute(element, Some(expected), Some(replacement))
     }
 
-    pub(super) fn replace_managed_projection(
+    /// Replaces the managed Text projection for a complete semantic owner.
+    ///
+    /// This operation is intended for owner-level changes, such as promoting
+    /// a different dialogue alternative, where the new text is not expected to
+    /// match the retained source text. It preserves the managed Paragraph
+    /// shell and direct non-Text siblings, and reuses compatible Text templates
+    /// when rebuilding the projection. Missing managed anchors, unsupported
+    /// Text mappings, and opaque managed Paragraph topology remain errors; this
+    /// does not weaken the source checks required by incremental text sync.
+    pub fn replace_managed_projection(
         &mut self,
         semantic: &ScreenplayElement,
     ) -> Result<(), PreservationError> {
@@ -872,24 +881,116 @@ impl PreservationState {
         }) {
             return Err(PreservationError::UnsupportedTextMapping);
         }
-        let runs = semantic_text_runs(semantic);
+        let runs = normalize_runs(&semantic.text, &semantic_text_runs(semantic))
+            .map_err(|_| PreservationError::UnsupportedTextMapping)?;
+        if runs.iter().any(|run| {
+            let mut names = BTreeSet::new();
+            run.attributes.iter().any(|attribute| {
+                !is_valid_run_attribute_name(&attribute.name)
+                    || !names.insert(attribute.name.as_str())
+            })
+        }) {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+        let mut used_templates = vec![false; templates.len()];
+        let mut template_cursor = 0usize;
+        let mut projected = Vec::with_capacity(runs.len());
+        for run in &runs {
+            let compatible = templates.iter().enumerate().find_map(|(slot, template)| {
+                (!used_templates[slot]
+                    && text_element_matches_run(template, run)
+                    && text_element_can_represent_run(template, run))
+                .then_some(slot)
+            });
+            let positional = templates
+                .iter()
+                .enumerate()
+                .find_map(|(slot, template)| {
+                    (slot >= template_cursor
+                        && !used_templates[slot]
+                        && text_element_can_represent_run(template, run))
+                    .then_some(slot)
+                })
+                .or_else(|| {
+                    templates.iter().enumerate().find_map(|(slot, template)| {
+                        (!used_templates[slot] && text_element_can_represent_run(template, run))
+                            .then_some(slot)
+                    })
+                });
+            let selected = compatible.or(positional);
+            let element = if let Some(slot) = selected {
+                used_templates[slot] = true;
+                template_cursor = slot.saturating_add(1);
+                let template = &templates[slot];
+                if text_element_matches_run(template, run) {
+                    text_element_for_run(template, run)
+                } else {
+                    let has_unrepresented_unmanaged_attribute =
+                        template.attributes.iter().any(|source| {
+                            let source_name = source
+                                .name
+                                .qualified_name
+                                .as_deref()
+                                .unwrap_or(source.name.local_name.as_str());
+                            let unqualified = !source_name.contains(':')
+                                && !source
+                                    .name
+                                    .namespace_uri
+                                    .as_deref()
+                                    .is_some_and(|namespace| !namespace.is_empty());
+                            let managed_formatting = matches!(
+                                source_name,
+                                "Style" | "Size" | "Font" | "Color" | "Background"
+                            );
+                            unqualified
+                                && !managed_formatting
+                                && !run
+                                    .attributes
+                                    .iter()
+                                    .any(|attribute| attribute.name == source_name)
+                        });
+                    if has_unrepresented_unmanaged_attribute {
+                        return Err(PreservationError::UnsupportedTextMapping);
+                    }
+                    sync_text_element_attributes(template, run)?
+                }
+            } else {
+                new_plain_text_element(paragraph, run)?
+            };
+            projected.push(PreservedNode::Element(element));
+        }
+        if templates.iter().enumerate().any(|(slot, template)| {
+            !used_templates[slot]
+                && template.attributes.iter().any(|source| {
+                    let source_name = source
+                        .name
+                        .qualified_name
+                        .as_deref()
+                        .unwrap_or(source.name.local_name.as_str());
+                    let unqualified = !source_name.contains(':')
+                        && !source
+                            .name
+                            .namespace_uri
+                            .as_deref()
+                            .is_some_and(|namespace| !namespace.is_empty());
+                    !unqualified
+                        || !matches!(
+                            source_name,
+                            "Style" | "Size" | "Font" | "Color" | "Background"
+                        )
+                })
+        })
+        {
+            return Err(PreservationError::UnsupportedTextMapping);
+        }
+
         let mut rebuilt = Vec::with_capacity(paragraph.children.len().saturating_add(runs.len()));
         let mut inserted = false;
-        let mut template_cursor = 0usize;
         for child in &paragraph.children {
             match child {
                 PreservedNode::Element(element) if is_text_element(element, paragraph) => {
                     if !inserted {
-                        for run in &runs {
-                            let template = templates
-                                .iter()
-                                .find(|candidate| text_element_matches_run(candidate, run))
-                                .or_else(|| templates.get(template_cursor))
-                                .ok_or(PreservationError::UnsupportedTextMapping)?;
-                            template_cursor = template_cursor.saturating_add(1);
-                            rebuilt
-                                .push(PreservedNode::Element(text_element_for_run(template, run)));
-                        }
+                        rebuilt.extend(projected.iter().cloned());
                         inserted = true;
                     }
                 }
@@ -898,18 +999,26 @@ impl PreservationState {
                 {
                     rebuilt.push(child.clone())
                 }
-                PreservedNode::Element(element) if !is_text_element(element, paragraph) => {
-                    rebuilt.push(child.clone())
-                }
-                PreservedNode::Comment(_) | PreservedNode::ProcessingInstruction { .. } => {
-                    rebuilt.push(child.clone())
-                }
+                PreservedNode::Element(_) | PreservedNode::Comment(_)
+                | PreservedNode::ProcessingInstruction { .. } => rebuilt.push(child.clone()),
                 _ => return Err(PreservationError::UnsupportedTextMapping),
             }
         }
-        if !inserted && !runs.is_empty() {
-            return Err(PreservationError::UnsupportedTextMapping);
+        if !inserted && !projected.is_empty() {
+            // With no historical Text anchor, retain legal leading XML
+            // whitespace and put the managed projection before the first
+            // direct non-Text child (not after inline Alts or attachments).
+            let insertion_index = paragraph
+                .children
+                .iter()
+                .take_while(|child| {
+                    matches!(child, PreservedNode::Text(text) | PreservedNode::CData(text) if text.trim().is_empty())
+                })
+                .count();
+            rebuilt.splice(insertion_index..insertion_index, projected);
         }
+        // Keep mutation atomic: all run conversion and topology validation above
+        // completes before the managed Paragraph receives its staged children.
         paragraph.children = rebuilt.into();
         Ok(())
     }
@@ -1325,6 +1434,11 @@ pub(super) fn text_element_can_represent_run(element: &PreservedElement, run: &T
                 .as_deref()
                 .unwrap_or(source.name.local_name.as_str())
                 == name
+                && source
+                    .name
+                    .namespace_uri
+                    .as_deref()
+                    .is_some_and(|namespace| !namespace.is_empty())
         })
     };
     element.attributes.iter().all(|source| {
@@ -1458,9 +1572,27 @@ pub(super) fn text_element_for_run(template: &PreservedElement, run: &TextRun) -
     element.attributes = run
         .attributes
         .iter()
-        .map(|attribute| PreservedAttribute {
-            name: source_name_from_qname(&attribute.name),
-            value: attribute.value.clone(),
+        .map(|attribute| {
+            template
+                .attributes
+                .iter()
+                .find(|source| {
+                    source
+                        .name
+                        .qualified_name
+                        .as_deref()
+                        .unwrap_or(source.name.local_name.as_str())
+                        == attribute.name
+                })
+                .map(|source| {
+                    let mut retained = source.clone();
+                    retained.value.clone_from(&attribute.value);
+                    retained
+                })
+                .unwrap_or_else(|| PreservedAttribute {
+                    name: source_name_from_qname(&attribute.name),
+                    value: attribute.value.clone(),
+                })
         })
         .collect();
     let existing_text = element
@@ -1541,6 +1673,16 @@ fn is_valid_unqualified_attribute_name(name: &str) -> bool {
     name.chars().next().is_some_and(|character| {
         character.is_alphabetic() || character == '_'
     })
+}
+
+fn is_valid_run_attribute_name(name: &str) -> bool {
+    if is_valid_unqualified_attribute_name(name) {
+        return true;
+    }
+    let Some((prefix, local_name)) = name.split_once(':') else {
+        return false;
+    };
+    is_valid_unqualified_attribute_name(prefix) && is_valid_unqualified_attribute_name(local_name)
 }
 
 fn replace_text_element_children(

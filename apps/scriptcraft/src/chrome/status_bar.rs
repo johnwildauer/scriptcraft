@@ -1349,6 +1349,9 @@ pub(crate) struct DiagnosticProjection<'a> {
     pub(crate) aligned_edit_update_summaries: [&'a str; 2],
     pub(crate) aligned_edit_update_other_detail_summary: &'a str,
     pub(crate) layout_build_detail_summary: &'a str,
+    pub(crate) alt_outcome_summary: &'a str,
+    pub(crate) alt_pointer_summary: &'a str,
+    pub(crate) font_preparation_summary: &'a str,
     pub(crate) diagnostic_message: Option<&'a str>,
 }
 
@@ -1375,6 +1378,18 @@ impl DiagnosticProjection<'_> {
 
     pub(super) fn safe_layout_build_detail_summary(self) -> String {
         self.layout_build_detail_summary.to_owned()
+    }
+
+    pub(super) fn safe_alt_outcome_summary(self) -> String {
+        self.alt_outcome_summary.to_owned()
+    }
+
+    pub(super) fn safe_alt_pointer_summary(self) -> String {
+        self.alt_pointer_summary.to_owned()
+    }
+
+    pub(super) fn safe_font_preparation_summary(self) -> String {
+        self.font_preparation_summary.to_owned()
     }
 }
 
@@ -1770,6 +1785,9 @@ fn show_impl_with_appearance(
                         diagnostics.safe_aligned_edit_update_other_detail_summary();
                     let layout_build_detail_summary =
                         diagnostics.safe_layout_build_detail_summary();
+                    let alt_outcome_summary = diagnostics.safe_alt_outcome_summary();
+                    let alt_pointer_summary = diagnostics.safe_alt_pointer_summary();
+                    let font_preparation_summary = diagnostics.safe_font_preparation_summary();
                     let summary_height = ui.text_style_height(&egui::TextStyle::Body);
                     let summary_width = ui.available_width();
                     one_line_region(
@@ -1843,6 +1861,24 @@ fn show_impl_with_appearance(
                             presentation::default_foreground(detail_ui),
                         );
                     });
+                    for (summary, id_source) in [
+                        (&alt_outcome_summary, "status-diagnostics-alt-outcomes"),
+                        (&alt_pointer_summary, "status-diagnostics-alt-pointer"),
+                        (&font_preparation_summary, "status-diagnostics-font-preparation"),
+                    ] {
+                        one_line_region(
+                            ui,
+                            egui::vec2(summary_width, summary_height),
+                            |detail_ui| {
+                                paint_noninteractive_text(
+                                    detail_ui,
+                                    id_source,
+                                    summary,
+                                    presentation::default_foreground(detail_ui),
+                                );
+                            },
+                        );
+                    }
                     if let Some(message) = diagnostics.diagnostic_message {
                         one_line_region(
                             ui,

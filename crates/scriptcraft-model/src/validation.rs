@@ -7,6 +7,11 @@ use crate::{
         MIN_CARD_WIDTH,
     },
     dual_dialogue::{self, DualDialogueError},
+    dialogue_alts::{
+        DialogueAlternatives, MAX_DIALOGUE_ALT_RUN_VALUES_PER_PROJECT,
+        MAX_DIALOGUE_ALT_ATTRIBUTE_BYTES_PER_PROJECT, MAX_DIALOGUE_ALT_TEXT_BYTES_PER_PROJECT,
+        MAX_DIALOGUE_ALT_VARIANTS_PER_OWNER, MAX_DIALOGUE_ALT_VARIANTS_PER_PROJECT,
+    },
     element::{
         ScreenplayElement, TextRun, MAX_PROVENANCE_STRING_BYTES, MAX_RUNS_PER_ELEMENT,
         MAX_RUN_ATTRIBUTES, MAX_RUN_ATTRIBUTE_BYTES,
@@ -27,6 +32,9 @@ pub const MAX_ELEMENTS: usize = 10_000;
 pub(crate) fn validate_element(element: &ScreenplayElement) -> Result<(), ModelError> {
     StableId::new(element.id.as_str())?;
     validate_text_runs(&element.text, &element.runs, false)?;
+    if let Some(alternatives) = &element.dialogue_alternatives {
+        validate_dialogue_alternatives(alternatives)?;
+    }
     if element.source_provenance.as_ref().is_some_and(|source| {
         source
             .foreign_id
@@ -38,6 +46,21 @@ pub(crate) fn validate_element(element: &ScreenplayElement) -> Result<(), ModelE
                 .is_some_and(|value| value.len() > MAX_PROVENANCE_STRING_BYTES)
     }) {
         return Err(ModelError::StringTooLong);
+    }
+    Ok(())
+}
+
+fn validate_dialogue_alternatives(alternatives: &DialogueAlternatives) -> Result<(), ModelError> {
+    if alternatives.total_count() > MAX_DIALOGUE_ALT_VARIANTS_PER_OWNER {
+        return Err(ModelError::TooManyElements);
+    }
+    let mut ids = BTreeSet::new();
+    ids.insert(alternatives.current);
+    for alternative in &alternatives.inactive {
+        if !ids.insert(alternative.id) {
+            return Err(ModelError::DuplicateId);
+        }
+        validate_text_runs(&alternative.text, &alternative.runs, true)?;
     }
     Ok(())
 }
@@ -377,6 +400,10 @@ impl Project {
         self.element_definitions().validate()?;
         let mut ids = BTreeSet::new();
         let mut element_ids = BTreeSet::new();
+        let mut dialogue_alt_variant_count = 0usize;
+        let mut dialogue_alt_text_bytes = 0usize;
+        let mut dialogue_alt_run_values = 0usize;
+        let mut dialogue_alt_attribute_bytes = 0usize;
         for item in &self.title_page {
             item.validate()?;
             if let Some(key) = item.element_type() {
@@ -391,6 +418,62 @@ impl Project {
         }
         for item in &self.elements {
             validate_element(item)?;
+            if let Some(alternatives) = &item.dialogue_alternatives {
+                dialogue_alt_variant_count = dialogue_alt_variant_count
+                    .checked_add(alternatives.total_count())
+                    .filter(|count| *count <= MAX_DIALOGUE_ALT_VARIANTS_PER_PROJECT)
+                    .ok_or(ModelError::TooManyElements)?;
+                dialogue_alt_text_bytes = dialogue_alt_text_bytes
+                    .checked_add(item.text.len())
+                    .filter(|count| *count <= MAX_DIALOGUE_ALT_TEXT_BYTES_PER_PROJECT)
+                    .ok_or(ModelError::TextTooLong)?;
+                dialogue_alt_run_values = dialogue_alt_run_values
+                    .checked_add(item.runs.len())
+                    .filter(|count| *count <= MAX_DIALOGUE_ALT_RUN_VALUES_PER_PROJECT)
+                    .ok_or(ModelError::TooManyRuns)?;
+                let active_attribute_count = item.runs.iter().try_fold(0usize, |count, run| {
+                    count.checked_add(run.attributes.len())
+                }).ok_or(ModelError::TooManyRunAttributes)?;
+                dialogue_alt_run_values = dialogue_alt_run_values
+                    .checked_add(active_attribute_count)
+                    .filter(|count| *count <= MAX_DIALOGUE_ALT_RUN_VALUES_PER_PROJECT)
+                    .ok_or(ModelError::TooManyRunAttributes)?;
+                for run in &item.runs {
+                    for attribute in &run.attributes {
+                        dialogue_alt_attribute_bytes = dialogue_alt_attribute_bytes
+                            .checked_add(attribute.name.len())
+                            .and_then(|count| count.checked_add(attribute.value.len()))
+                            .filter(|count| *count <= MAX_DIALOGUE_ALT_ATTRIBUTE_BYTES_PER_PROJECT)
+                            .ok_or(ModelError::StringTooLong)?;
+                    }
+                }
+                for alternative in &alternatives.inactive {
+                    dialogue_alt_text_bytes = dialogue_alt_text_bytes
+                        .checked_add(alternative.text.len())
+                        .filter(|count| *count <= MAX_DIALOGUE_ALT_TEXT_BYTES_PER_PROJECT)
+                        .ok_or(ModelError::TextTooLong)?;
+                    dialogue_alt_run_values = dialogue_alt_run_values
+                        .checked_add(alternative.runs.len())
+                        .filter(|count| *count <= MAX_DIALOGUE_ALT_RUN_VALUES_PER_PROJECT)
+                        .ok_or(ModelError::TooManyRuns)?;
+                    let attribute_count = alternative.runs.iter().try_fold(0usize, |count, run| {
+                        count.checked_add(run.attributes.len())
+                    }).ok_or(ModelError::TooManyRunAttributes)?;
+                    dialogue_alt_run_values = dialogue_alt_run_values
+                        .checked_add(attribute_count)
+                        .filter(|count| *count <= MAX_DIALOGUE_ALT_RUN_VALUES_PER_PROJECT)
+                        .ok_or(ModelError::TooManyRunAttributes)?;
+                    for run in &alternative.runs {
+                        for attribute in &run.attributes {
+                            dialogue_alt_attribute_bytes = dialogue_alt_attribute_bytes
+                                .checked_add(attribute.name.len())
+                                .and_then(|count| count.checked_add(attribute.value.len()))
+                                .filter(|count| *count <= MAX_DIALOGUE_ALT_ATTRIBUTE_BYTES_PER_PROJECT)
+                                .ok_or(ModelError::StringTooLong)?;
+                        }
+                    }
+                }
+            }
             let key = item.element_type();
             if self.element_definitions().get(&key).is_none() {
                 return Err(ModelError::MissingElementDefinition(key));
@@ -481,6 +564,9 @@ impl Project {
             return Ok(false);
         };
         if before.id != after.id {
+            return Ok(false);
+        }
+        if before.dialogue_alternatives != after.dialogue_alternatives {
             return Ok(false);
         }
         if self.title_page != baseline.title_page
