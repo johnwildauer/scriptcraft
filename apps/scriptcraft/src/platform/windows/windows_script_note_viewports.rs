@@ -1,7 +1,7 @@
 //! Best-effort, per-HWND suppression of DWM transitions for ScriptNote windows.
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{BOOL, HWND};
+use windows::core::{BOOL, PCWSTR};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
 };
@@ -51,8 +51,10 @@ pub(crate) fn disable_transitions(
     // SAFETY: The title pointer remains valid for the synchronous lookup.
     // FindWindowW resolves only this dedicated title; ownership is verified
     // below before any attribute is applied.
-    let hwnd = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) };
-    if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
+    let Ok(hwnd) = (unsafe { FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) }) else {
+        return TransitionControlOutcome::Unavailable;
+    };
+    if hwnd.0.is_null() || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
         return TransitionControlOutcome::Unavailable;
     }
 
@@ -94,8 +96,10 @@ pub(crate) fn hide_type_dialog_caption_buttons() -> TransitionControlOutcome {
         .collect();
 
     // SAFETY: The title pointer remains valid for the synchronous lookup.
-    let hwnd = unsafe { FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) };
-    if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
+    let Ok(hwnd) = (unsafe { FindWindowW(PCWSTR::null(), PCWSTR(title.as_ptr())) }) else {
+        return TransitionControlOutcome::Unavailable;
+    };
+    if hwnd.0.is_null() || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
         return TransitionControlOutcome::Unavailable;
     }
 
@@ -127,7 +131,7 @@ pub(crate) fn hide_type_dialog_caption_buttons() -> TransitionControlOutcome {
     if unsafe {
         SetWindowPos(
             hwnd,
-            HWND::default(),
+            None,
             0,
             0,
             0,
@@ -135,7 +139,7 @@ pub(crate) fn hide_type_dialog_caption_buttons() -> TransitionControlOutcome {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         )
     }
-    .as_bool()
+    .is_ok()
     {
         TransitionControlOutcome::Applied
     } else {
