@@ -36,6 +36,31 @@ fn strict_boundary_rejects(
         && offset != text_len
 }
 
+struct EnterDecisionText<'a> {
+    text: &'a str,
+    delete_suffix: bool,
+}
+
+fn enter_decision_text(text: &str, offset: usize) -> EnterDecisionText<'_> {
+    let Some(suffix) = text.get(offset..) else {
+        return EnterDecisionText {
+            text,
+            delete_suffix: false,
+        };
+    };
+    if !suffix.is_empty() && suffix.as_bytes().iter().all(|byte| *byte == b' ') {
+        EnterDecisionText {
+            text: &text[..offset],
+            delete_suffix: true,
+        }
+    } else {
+        EnterDecisionText {
+            text,
+            delete_suffix: false,
+        }
+    }
+}
+
 fn resolved_target(
     project: &Project,
     source: &ElementTypeKey,
@@ -67,10 +92,12 @@ pub(super) enum EnterAction {
     RepairAndInsert {
         element: usize,
         element_type: ElementTypeKey,
+        delete_suffix: bool,
     },
     Split {
         position: Position,
         element_type: ElementTypeKey,
+        delete_suffix: bool,
     },
 }
 
@@ -122,7 +149,19 @@ pub(super) fn resolve_enter(
         });
     };
     let capabilities = semantics.capabilities();
-    if strict_boundary_rejects(policy, capabilities, item.text.len(), start.offset) {
+    let can_classify_suffix = capabilities.scene_boundary
+        || capabilities.character_cue
+        || capabilities.transition
+        || capabilities.parenthetical;
+    let enter_text = if can_classify_suffix {
+        enter_decision_text(item.text.as_str(), start.offset)
+    } else {
+        EnterDecisionText {
+            text: item.text.as_str(),
+            delete_suffix: false,
+        }
+    };
+    if strict_boundary_rejects(policy, capabilities, enter_text.text.len(), start.offset) {
         return Ok(EnterDecision {
             target: ParagraphKeyTarget::NoOp,
             action: EnterAction::NoOp,
@@ -161,7 +200,7 @@ pub(super) fn resolve_enter(
                 },
             });
         }
-        if parenthetical_repair_boundary(item.text.as_str(), position.offset).is_some() {
+        if parenthetical_enter_repair_boundary(enter_text.text, position.offset).is_some() {
             let Some(element_type) =
                 resolved_target(project, &source_key, ParagraphBehaviorKey::Return)
             else {
@@ -175,6 +214,7 @@ pub(super) fn resolve_enter(
                 action: EnterAction::RepairAndInsert {
                     element: position.element,
                     element_type,
+                    delete_suffix: enter_text.delete_suffix,
                 },
             });
         }
@@ -203,6 +243,7 @@ pub(super) fn resolve_enter(
         action: EnterAction::Split {
             position,
             element_type,
+            delete_suffix: enter_text.delete_suffix,
         },
     })
 }
@@ -351,5 +392,15 @@ fn parenthetical_repair_boundary(text: &str, offset: usize) -> Option<usize> {
         (false, true) => text.len(),
         (false, false) => text.len() + 1,
         (true, true) => text.len(),
+    })
+}
+
+fn parenthetical_enter_repair_boundary(text: &str, offset: usize) -> Option<usize> {
+    parenthetical_repair_boundary(text, offset).or_else(|| {
+        (text.starts_with('(')
+            && text.ends_with(')')
+            && text.len() > 2
+            && offset == text.len())
+        .then_some(text.len())
     })
 }

@@ -164,14 +164,24 @@ impl EditingSession {
                     EnterAction::RepairAndInsert {
                         element,
                         element_type,
+                        delete_suffix,
                     } => {
+                        if delete_suffix {
+                            delete_enter_suffix(project, selection.anchor)?;
+                        }
                         repair_parenthetical_in_project(project, element)?;
                         insert_dialogue_below(project, element, element_type)
                     }
                     EnterAction::Split {
                         position,
                         element_type,
-                    } => split_at(project, position, element_type),
+                        delete_suffix,
+                    } => {
+                        if delete_suffix {
+                            delete_enter_suffix(project, position)?;
+                        }
+                        split_at(project, position, element_type)
+                    }
                 }
             },
         )
@@ -392,6 +402,24 @@ fn clear_body_paragraph_formatting(
         preservation.clear_direct_paragraph_overrides(&id);
     }
     Ok(())
+}
+
+fn delete_enter_suffix(project: &mut Project, position: Position) -> Result<(), EditError> {
+    let text_len = project
+        .elements
+        .get(position.element)
+        .ok_or(EditError::InvalidElement)?
+        .text
+        .len();
+    replace_range(
+        project,
+        position,
+        Position {
+            element: position.element,
+            offset: text_len,
+        },
+        "",
+    )
 }
 
 pub(super) fn update_preserved_type(
