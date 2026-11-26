@@ -335,7 +335,10 @@ impl EditingSession {
                 title_selection: self.title_selection, beat_selection: self.beat_selection.clone(),
                 title_typing_style: self.title_typing_style, body_typing_style: self.body_typing_style,
                 body_typing_formatting: self.body_typing_formatting, beat_typing_style: self.beat_typing_style,
-                beat_typing_formatting: self.beat_typing_formatting, generated_parentheticals: self.generated_parentheticals.clone() };
+                beat_typing_formatting: self.beat_typing_formatting,
+                script_note_typing_style: self.script_note_typing_style,
+                script_note_typing_formatting: self.script_note_typing_formatting,
+                generated_parentheticals: self.generated_parentheticals.clone() };
             self.push_history(snapshot);
             self.project = project;
             self.redo.clear();

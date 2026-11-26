@@ -91,7 +91,9 @@ impl ScriptCraftApp {
                 self.execute_editor(&command, RevealIntent::None, ctx),
             command @ (Command::ScriptNoteCreate { .. } | Command::ScriptNoteDelete { .. }
                 | Command::ScriptNotePropertiesSet { .. } | Command::ScriptNoteSelectionSet { .. }
-                | Command::ScriptNoteTextEdit { .. } | Command::ScriptNoteTextNavigate { .. }) =>
+                | Command::ScriptNoteTextEdit { .. } | Command::ScriptNoteTextNavigate { .. }
+                | Command::ScriptNoteStyleToggle { .. } | Command::ScriptNoteStyleClear { .. }
+                | Command::ScriptNoteRunFormattingSet { .. }) =>
                 self.execute_editor(&command, RevealIntent::None, ctx),
             Command::EditorStyleToggle { surface, style } => self.execute_editor(
                 &Command::EditorStyleToggle { surface, style },

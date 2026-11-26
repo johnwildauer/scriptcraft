@@ -10,12 +10,17 @@ use scriptcraft_model::formatting::{
     FixedPoint, ParagraphAlignment, ParagraphLeading, ParagraphSpacing, SourceParagraphOverrides,
 };
 use scriptcraft_model::formatted_text::InlineColor;
+use scriptcraft_model::formatted_text::{
+    clear_supported_styles_over_ranges, parse_style_attribute, project_style_at_caret,
+    set_inline_run_formatting_for_range, toggle_style_over_ranges, InlineRunFormattingPatch,
+    RunBoundaryAffinity, RunStyle, RunStyleFlags, RunStyleRange,
+};
 use scriptcraft_model::paragraph_id::ParagraphIdAllocator;
 use scriptcraft_model::preservation::{
     AnchorTarget, ForeignIdDomain, ForeignIdentity, ReferencePolicy,
 };
 use scriptcraft_model::{
-    Project, ScriptNote, ScriptNoteParagraph, ScriptNoteRange, ScriptNotes, StableId,
+    Project, RunAttribute, ScriptNote, ScriptNoteParagraph, ScriptNoteRange, ScriptNotes, StableId,
     DEFAULT_SCRIPT_NOTE_COLOR_RAW, MAX_TEXT_BYTES,
 };
 use std::collections::BTreeSet;
@@ -235,11 +240,15 @@ impl EditingSession {
         let semantic_change = candidate != self.project;
         let selection_change = selection != self.script_note_selection;
         if !semantic_change && !selection_change { return Ok(()); }
+        let previous_selection = self.script_note_selection.clone();
         if semantic_change {
             self.push_history(Snapshot {
                 project: self.project.clone(), selection: self.selection, title_selection: self.title_selection,
                 beat_selection: self.beat_selection.clone(), beat_typing_style: self.beat_typing_style,
-                beat_typing_formatting: self.beat_typing_formatting, title_typing_style: self.title_typing_style,
+                beat_typing_formatting: self.beat_typing_formatting,
+                script_note_typing_style: self.script_note_typing_style,
+                script_note_typing_formatting: self.script_note_typing_formatting,
+                title_typing_style: self.title_typing_style,
                 body_typing_style: self.body_typing_style, body_typing_formatting: self.body_typing_formatting,
                 generated_parentheticals: self.generated_parentheticals.clone(),
             });
@@ -252,7 +261,161 @@ impl EditingSession {
         }
         self.script_note_selection = selection;
         self.mark_mutated();
+        self.update_script_note_typing_from_selection(&previous_selection)?;
         Ok(())
+    }
+
+    fn update_script_note_typing_from_selection(&mut self, previous: &ScriptNoteSelection) -> Result<(), EditError> {
+        let old_style = self.script_note_typing_style;
+        let old_formatting = self.script_note_typing_formatting;
+        let style = match &self.script_note_selection {
+            ScriptNoteSelection::Text { note, field: ScriptNoteField::Body, anchor, focus } if anchor == focus => {
+                let paragraph = self.project.script_notes().get(note)
+                    .and_then(|note| note.paragraphs.get(focus.paragraph)).ok_or(EditError::InvalidSelection)?;
+                project_style_at_caret(&paragraph.text, &paragraph.runs, focus.offset,
+                    RunBoundaryAffinity::Right, old_style).map_err(EditError::FormattedText)?
+            }
+            _ => RunStyleFlags::default(),
+        };
+        self.script_note_typing_style = style;
+        let same_body_caret = matches!((previous, &self.script_note_selection),
+            (ScriptNoteSelection::Text { note: old_note, field: ScriptNoteField::Body, anchor: old_anchor, focus: old_focus },
+             ScriptNoteSelection::Text { note, field: ScriptNoteField::Body, anchor, focus })
+             if old_note == note && old_anchor == old_focus && anchor == focus && old_focus == focus);
+        if !same_body_caret {
+            self.script_note_typing_formatting = InlineRunFormattingPatch::default();
+        }
+        if old_style != self.script_note_typing_style || old_formatting != self.script_note_typing_formatting {
+            self.mark_mutated();
+        }
+        Ok(())
+    }
+
+    /// Toggle a supported inline style in an open ScriptNote Body selection.
+    /// A collapsed caret updates only ephemeral typing state.
+    pub fn toggle_script_note_run_style(&mut self, style: RunStyle, timestamp: String) -> Result<(), EditError> {
+        let ScriptNoteSelection::Text { note: note_id, field: ScriptNoteField::Body, anchor, focus } = self.script_note_selection.clone()
+            else { return Err(EditError::InvalidSelection) };
+        if !self.script_note_selection_is_valid() { return Err(EditError::InvalidSelection); }
+        if anchor == focus {
+            let paragraph = self.project.script_notes().get(&note_id)
+                .and_then(|note| note.paragraphs.get(focus.paragraph)).ok_or(EditError::InvalidSelection)?;
+            let current = project_style_at_caret(&paragraph.text, &paragraph.runs, focus.offset,
+                RunBoundaryAffinity::Right, self.script_note_typing_style).map_err(EditError::FormattedText)?;
+            self.script_note_typing_style = current.toggled(style);
+            self.mark_mutated();
+            return Ok(());
+        }
+        let (start, end) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
+        let source = self.project.script_notes().get(&note_id).ok_or(EditError::InvalidSelection)?;
+        if end.paragraph >= source.paragraphs.len() { return Err(EditError::InvalidSelection); }
+        let ranges = (start.paragraph..=end.paragraph).map(|index| {
+            let paragraph = &source.paragraphs[index];
+            RunStyleRange { canonical_text: &paragraph.text, runs: &paragraph.runs,
+                range: (if index == start.paragraph { start.offset } else { 0 })..
+                    (if index == end.paragraph { end.offset } else { paragraph.text.len() }) }
+        }).collect::<Vec<_>>();
+        let edits = toggle_style_over_ranges(&ranges, self.script_note_typing_style, style)
+            .map_err(EditError::FormattedText)?;
+        let mut candidate = self.project.clone();
+        let mut notes = candidate.script_notes().iter().cloned().collect::<Vec<_>>();
+        let note = notes.iter_mut().find(|note| note.id == note_id).ok_or(EditError::InvalidSelection)?;
+        let mut changed = false;
+        for (offset, edit) in edits.into_iter().enumerate() {
+            let paragraph = &mut note.paragraphs[start.paragraph + offset];
+            let normalized = effective_runs(&paragraph.text, &edit.runs);
+            changed |= normalized != effective_runs(&paragraph.text, &paragraph.runs);
+            paragraph.runs = normalized;
+        }
+        if !changed { return Ok(()); }
+        note.date_modified = timestamp;
+        candidate.replace_script_notes(ScriptNotes::new(notes))?;
+        self.publish_script_note(candidate, self.script_note_selection.clone())
+    }
+
+    /// Clear supported run styles while preserving unknown tokens and attributes.
+    pub fn clear_script_note_run_styles(&mut self, timestamp: String) -> Result<(), EditError> {
+        let ScriptNoteSelection::Text { note: note_id, field: ScriptNoteField::Body, anchor, focus } = self.script_note_selection.clone()
+            else { return Err(EditError::InvalidSelection) };
+        if !self.script_note_selection_is_valid() { return Err(EditError::InvalidSelection); }
+        if anchor == focus {
+            if self.script_note_typing_style != RunStyleFlags::default() {
+                self.script_note_typing_style = RunStyleFlags::default();
+                self.mark_mutated();
+            }
+            return Ok(());
+        }
+        let (start, end) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
+        let source = self.project.script_notes().get(&note_id).ok_or(EditError::InvalidSelection)?;
+        if end.paragraph >= source.paragraphs.len() { return Err(EditError::InvalidSelection); }
+        let ranges = (start.paragraph..=end.paragraph).map(|index| {
+            let paragraph = &source.paragraphs[index];
+            RunStyleRange { canonical_text: &paragraph.text, runs: &paragraph.runs,
+                range: (if index == start.paragraph { start.offset } else { 0 })..
+                    (if index == end.paragraph { end.offset } else { paragraph.text.len() }) }
+        }).collect::<Vec<_>>();
+        let edits = clear_supported_styles_over_ranges(&ranges).map_err(EditError::FormattedText)?;
+        let mut candidate = self.project.clone();
+        let mut notes = candidate.script_notes().iter().cloned().collect::<Vec<_>>();
+        let note = notes.iter_mut().find(|note| note.id == note_id).ok_or(EditError::InvalidSelection)?;
+        let mut changed = false;
+        for (offset, edit) in edits.into_iter().enumerate() {
+            let paragraph = &mut note.paragraphs[start.paragraph + offset];
+            let normalized = effective_runs(&paragraph.text, &edit.runs);
+            changed |= normalized != effective_runs(&paragraph.text, &paragraph.runs);
+            paragraph.runs = normalized;
+        }
+        if !changed { return Ok(()); }
+        note.date_modified = timestamp;
+        candidate.replace_script_notes(ScriptNotes::new(notes))?;
+        self.publish_script_note(candidate, self.script_note_selection.clone())
+    }
+
+    /// Set bounded inline attributes over a ScriptNote Body range, or merge
+    /// them into collapsed-caret typing state without changing the Project.
+    pub fn set_script_note_run_formatting(&mut self, patch: InlineRunFormattingPatch, timestamp: String) -> Result<(), EditError> {
+        if patch.is_empty() { return Ok(()); }
+        let ScriptNoteSelection::Text { note: note_id, field: ScriptNoteField::Body, anchor, focus } = self.script_note_selection.clone()
+            else { return Err(EditError::InvalidSelection) };
+        if !self.script_note_selection_is_valid() { return Err(EditError::InvalidSelection); }
+        if anchor == focus {
+            let mut next = self.script_note_typing_formatting;
+            if let Some(value) = patch.font { next.font = Some(value); }
+            if let Some(value) = patch.size { next.size = Some(value); }
+            if let Some(value) = patch.color { next.color = Some(value); }
+            if let Some(value) = patch.background { next.background = Some(value); }
+            if next != self.script_note_typing_formatting {
+                self.script_note_typing_formatting = next;
+                self.mark_mutated();
+            }
+            return Ok(());
+        }
+        let (start, end) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
+        let source = self.project.script_notes().get(&note_id).ok_or(EditError::InvalidSelection)?;
+        if end.paragraph >= source.paragraphs.len() { return Err(EditError::InvalidSelection); }
+        let mut candidate = self.project.clone();
+        let mut notes = candidate.script_notes().iter().cloned().collect::<Vec<_>>();
+        let note = notes.iter_mut().find(|note| note.id == note_id).ok_or(EditError::InvalidSelection)?;
+        let mut changed = false;
+        for index in start.paragraph..=end.paragraph {
+            let paragraph = &mut note.paragraphs[index];
+            let range = (if index == start.paragraph { start.offset } else { 0 })..
+                (if index == end.paragraph { end.offset } else { paragraph.text.len() });
+            if range.start > range.end || range.end > paragraph.text.len()
+                || !paragraph.text.is_char_boundary(range.start) || !paragraph.text.is_char_boundary(range.end) {
+                return Err(EditError::InvalidUtf8Boundary);
+            }
+            if range.is_empty() { continue; }
+            let source_runs = effective_runs(&paragraph.text, &paragraph.runs);
+            let normalized = set_inline_run_formatting_for_range(&paragraph.text, &source_runs, range, patch)
+                .map_err(EditError::FormattedText)?;
+            changed |= normalized != source_runs;
+            paragraph.runs = normalized;
+        }
+        if !changed { return Ok(()); }
+        note.date_modified = timestamp;
+        candidate.replace_script_notes(ScriptNotes::new(notes))?;
+        self.publish_script_note(candidate, self.script_note_selection.clone())
     }
 
     pub fn set_script_note_selection(&mut self, selection: ScriptNoteSelection) -> Result<(), EditError> {
@@ -359,6 +522,8 @@ impl EditingSession {
     pub fn edit_script_note_text(&mut self, operation: ScriptNoteTextEditOperation, timestamp: String) -> Result<(), EditError> {
         let ScriptNoteSelection::Text { note: note_id, field, anchor, focus } = self.script_note_selection.clone() else { return Err(EditError::InvalidSelection) };
         let (mut start, mut end) = if anchor <= focus { (anchor, focus) } else { (focus, anchor) };
+        let typing_style = self.script_note_typing_style;
+        let typing_formatting = self.script_note_typing_formatting;
         if operation == ScriptNoteTextEditOperation::Enter && field == ScriptNoteField::Title {
             return self.set_script_note_selection(ScriptNoteSelection::Text {
                 note: note_id, field: ScriptNoteField::Body,
@@ -415,7 +580,12 @@ impl EditingSession {
                 } else {
                     text.split('\n').map(str::to_owned).collect::<Vec<_>>()
                 };
-                let replacement_position = replace_note_body_range(&mut candidate, &mut note, start, end, &inserted_pieces)?;
+                let replacement_position = replace_note_body_range(
+                    &mut candidate, &mut note, start, end, &inserted_pieces,
+                    if anchor == focus { typing_style } else { RunStyleFlags::default() },
+                    if anchor == focus { typing_formatting } else { InlineRunFormattingPatch::default() },
+                    anchor == focus,
+                )?;
                 if operation == ScriptNoteTextEditOperation::Enter {
                     split_note_paragraph(&mut candidate, &mut note, replacement_position)?
                 } else { replacement_position }
@@ -427,7 +597,15 @@ impl EditingSession {
         candidate.replace_script_notes(ScriptNotes::new(notes))?;
         self.publish_script_note(candidate, ScriptNoteSelection::Text {
             note: note_id, field, anchor: final_position, focus: final_position,
-        })
+        })?;
+        if field == ScriptNoteField::Body && operation == ScriptNoteTextEditOperation::Enter && anchor == focus {
+            if self.script_note_typing_style != typing_style || self.script_note_typing_formatting != typing_formatting {
+                self.script_note_typing_style = typing_style;
+                self.script_note_typing_formatting = typing_formatting;
+                self.mark_mutated();
+            }
+        }
+        Ok(())
     }
 
     pub fn navigate_script_note_horizontal(&mut self, direction: ScriptNoteHorizontalDirection, extend: bool) -> Result<(), EditError> {
@@ -472,7 +650,16 @@ impl EditingSession {
     }
 }
 
-fn replace_note_body_range(project: &mut Project, note: &mut ScriptNote, start: ScriptNoteTextPosition, end: ScriptNoteTextPosition, chunks: &[String]) -> Result<ScriptNoteTextPosition, EditError> {
+fn replace_note_body_range(
+    project: &mut Project,
+    note: &mut ScriptNote,
+    start: ScriptNoteTextPosition,
+    end: ScriptNoteTextPosition,
+    chunks: &[String],
+    typing: RunStyleFlags,
+    patch: InlineRunFormattingPatch,
+    apply_typing: bool,
+) -> Result<ScriptNoteTextPosition, EditError> {
     if start.paragraph > end.paragraph || end.paragraph >= note.paragraphs.len() { return Err(EditError::InvalidSelection); }
     let left = note.paragraphs[start.paragraph].clone();
     let right = note.paragraphs[end.paragraph].clone();
@@ -481,7 +668,9 @@ fn replace_note_body_range(project: &mut Project, note: &mut ScriptNote, start: 
     }
     let left_runs = effective_runs(&left.text, &left.runs);
     let right_runs = effective_runs(&right.text, &right.runs);
-    let insertion_attributes = attributes_at(&left_runs, start.offset, left.text.len());
+    let insertion_attributes = styled_note_attributes(
+        attributes_at(&left_runs, start.offset, left.text.len()), typing, patch, apply_typing,
+    )?;
     let prefix = left.text[..start.offset].to_owned();
     let mut allocated = Vec::new();
     let mut durable = generated_identity_allocator(project);
@@ -512,6 +701,39 @@ fn replace_note_body_range(project: &mut Project, note: &mut ScriptNote, start: 
     for id in allocated { register_new_note_paragraph(project, &id)?; }
     let offset = if chunks.len() == 1 { prefix.len() + chunks[0].len() } else { chunks.last().map_or(0, String::len) };
     Ok(ScriptNoteTextPosition { paragraph: start.paragraph + chunks.len() - 1, offset })
+}
+
+fn styled_note_attributes(
+    mut attributes: Vec<RunAttribute>,
+    style: RunStyleFlags,
+    patch: InlineRunFormattingPatch,
+    apply_typing: bool,
+) -> Result<Vec<RunAttribute>, EditError> {
+    if apply_typing {
+        let parsed = parse_style_attribute(&attributes).map_err(EditError::FormattedText)?;
+        let supported = [
+            (RunStyle::Bold, "Bold"), (RunStyle::Italics, "Italic"),
+            (RunStyle::Underline, "Underline"), (RunStyle::Strikethrough, "Strikeout"),
+            (RunStyle::AllCaps, "AllCaps"),
+        ];
+        let mut tokens = supported.iter().filter_map(|(flag, token)| style.contains(*flag).then_some(*token))
+            .map(str::to_owned).collect::<Vec<_>>();
+        tokens.extend(parsed.unknown_tokens);
+        set_note_attribute(&mut attributes, "Style", (!tokens.is_empty()).then(|| tokens.join("+")));
+    }
+    if let Some(value) = patch.font { set_note_attribute(&mut attributes, "Font", value.map(|font| font.fdx_value().to_owned())); }
+    if let Some(value) = patch.size { set_note_attribute(&mut attributes, "Size", value.map(|size| size.points().to_string())); }
+    if let Some(value) = patch.color { set_note_attribute(&mut attributes, "Color", value.map(|color| color.fdx_value().to_owned())); }
+    if let Some(value) = patch.background { set_note_attribute(&mut attributes, "Background", value.map(|color| color.fdx_value().to_owned())); }
+    Ok(attributes)
+}
+
+fn set_note_attribute(attributes: &mut Vec<RunAttribute>, name: &str, value: Option<String>) {
+    if let Some(index) = attributes.iter().position(|attribute| attribute.name == name) {
+        if let Some(value) = value { attributes[index].value = value; } else { attributes.remove(index); }
+    } else if let Some(value) = value {
+        attributes.push(RunAttribute { name: name.to_owned(), value });
+    }
 }
 
 fn split_note_paragraph(project: &mut Project, note: &mut ScriptNote, position: ScriptNoteTextPosition) -> Result<ScriptNoteTextPosition, EditError> {

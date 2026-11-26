@@ -26,6 +26,8 @@ pub(crate) struct AppCommandAvailability {
     pub(crate) element_change: bool,
     pub(crate) run_formatting: bool,
     pub(crate) beat_formatting: bool,
+    pub(crate) note_text_focus: bool,
+    pub(crate) note_formatting: bool,
     pub(crate) paragraph_formatting: bool,
     pub(crate) dual_dialogue_toggle: bool,
     pub(crate) title_open: bool,
@@ -93,6 +95,25 @@ pub(crate) enum DesktopUnavailableReason {
 }
 
 impl ScriptCraftApp {
+    pub(crate) fn script_note_body_owns_input(&self) -> bool {
+        self.root_document_view == RootDocumentView::Script
+            && self.active_editor_surface == EditorSurface::Body
+            && self.script_note_workspace.focused
+            && self.script_note_workspace.viewport_focused
+            && self.script_note_workspace.field == Some(scriptcraft_session::editing::ScriptNoteField::Body)
+            && self.session.script_note_selection_is_valid()
+            && matches!(self.session.script_note_selection(),
+                scriptcraft_session::editing::ScriptNoteSelection::Text {
+                    note, field: scriptcraft_session::editing::ScriptNoteField::Body, ..
+                } if self.script_note_workspace.open_note.as_ref() == Some(note))
+            && !self.title_view_state_swapped
+            && !self.title_view.surface_focused
+            && !self.element_windows.owns_input()
+            && self.pending_fdx_open.is_none()
+            && !self.replacement_open_pending()
+            && !self.native_output_active()
+    }
+
     fn native_output_active(&self) -> bool {
         #[cfg(target_os = "windows")]
         {
@@ -209,13 +230,13 @@ impl ScriptCraftApp {
                 && scriptcraft_commands::Selection::from_core(self.session.selection())
                     .ok()
                     .is_some_and(|selection| selection.validate_for_surface(self.session.project(), EditorSurface::Body).is_ok());
-            availability.run_formatting = eligible;
+            availability.run_formatting = eligible || (*surface == EditorSurface::Body && availability.note_formatting);
             availability.paragraph_formatting = eligible;
         }
         if let scriptcraft_commands::Command::EditorStyleToggle { surface, .. }
             | scriptcraft_commands::Command::EditorStyleClear { surface } = command
         {
-            if *surface != self.active_editor_surface {
+            if *surface != self.active_editor_surface || availability.note_text_focus {
                 availability.beat_formatting = false;
             }
         }
@@ -237,6 +258,11 @@ impl ScriptCraftApp {
                     scriptcraft_session::editing::BeatSelection::Text {
                         field: scriptcraft_session::editing::BeatTextField::Body, ..
                     }) && self.session.beat_selection_is_valid();
+        }
+        if matches!(command, scriptcraft_commands::Command::ScriptNoteStyleToggle { .. }
+            | scriptcraft_commands::Command::ScriptNoteStyleClear { .. }
+            | scriptcraft_commands::Command::ScriptNoteRunFormattingSet { .. }) {
+            availability.note_formatting = availability.note_formatting && self.script_note_body_owns_input();
         }
         if let scriptcraft_commands::Command::FormatTemplateApply { template } = command {
             availability.template_apply_ready = self
@@ -367,6 +393,10 @@ impl ScriptCraftApp {
             && self.root_document_view == RootDocumentView::Script
             && !self.element_windows.owns_input()
             && !migration_pending && !replacement_pending && !native_output_active;
+        let note_body_focus = note_text_focus && matches!(self.session.script_note_selection(),
+            scriptcraft_session::editing::ScriptNoteSelection::Text {
+                field: scriptcraft_session::editing::ScriptNoteField::Body, ..
+            }) && self.script_note_workspace.field == Some(scriptcraft_session::editing::ScriptNoteField::Body);
         let note_has_range = note_text_focus && self.session.script_note_selection().ordered()
             .is_some_and(|(start, end)| start != end);
         let beat_text_focus = self.root_document_view == RootDocumentView::BeatBoard
@@ -421,6 +451,8 @@ impl ScriptCraftApp {
                     scriptcraft_session::editing::BeatSelection::Text {
                         field: scriptcraft_session::editing::BeatTextField::Body, ..
                     }) && self.session.beat_selection_is_valid(),
+            note_text_focus,
+            note_formatting: note_body_focus,
             paragraph_formatting: editor_available && self.active_editor_surface == EditorSurface::Body && valid_body_selection,
             dual_dialogue_toggle: false,
             // In-app Open is a selected-path replacement request and is blocked
@@ -525,6 +557,8 @@ impl AppCommandAvailability {
             CommandId::BeatBoardCardDelete => self.beat_card_delete,
             CommandId::BeatBoardStyleToggle | CommandId::BeatBoardStyleClear
             | CommandId::BeatBoardRunFormattingSet => self.beat_formatting,
+            CommandId::ScriptNoteStyleToggle | CommandId::ScriptNoteStyleClear
+            | CommandId::ScriptNoteRunFormattingSet => self.note_formatting,
             CommandId::ScriptNoteCreate => self.script_note_create,
             CommandId::ScriptNoteDelete | CommandId::ScriptNotePropertiesSet
             | CommandId::ScriptNoteSelectionSet | CommandId::ScriptNoteTextEdit
@@ -537,7 +571,7 @@ impl AppCommandAvailability {
             | CommandId::EditorNavigationLineEdge | CommandId::EditorFocus
             | CommandId::EditorAlignmentSet => self.editor_available,
             CommandId::EditorStyleToggle | CommandId::EditorStyleClear =>
-                self.editor_available || self.beat_formatting,
+                if self.note_text_focus { self.note_formatting } else { self.editor_available || self.beat_formatting },
             CommandId::EditUndo => self.undo,
             CommandId::EditRedo => self.redo,
             CommandId::EditDelete => self.delete,
@@ -546,7 +580,7 @@ impl AppCommandAvailability {
             CommandId::EditCopy => self.copy,
             CommandId::EditPaste => self.paste,
             CommandId::EditorElementChange => self.element_change,
-            CommandId::EditorRunFormattingSet => self.run_formatting || self.beat_formatting,
+            CommandId::EditorRunFormattingSet => if self.note_text_focus { self.note_formatting } else { self.run_formatting || self.beat_formatting },
             CommandId::EditorParagraphFormattingSet => self.paragraph_formatting,
             CommandId::EditorDualDialogueToggle => self.dual_dialogue_toggle,
             CommandId::WindowTitlePageOpen => self.title_open,
@@ -596,7 +630,8 @@ impl AppCommandAvailability {
             | CommandId::ScriptNoteCreate | CommandId::ScriptNoteDelete
             | CommandId::ScriptNotePropertiesSet | CommandId::ScriptNoteSelectionSet
             | CommandId::ScriptNoteTextEdit | CommandId::ScriptNoteTextNavigate
-            | CommandId::ScriptNotePresent => DesktopUnavailableReason::Selection,
+            | CommandId::ScriptNotePresent | CommandId::ScriptNoteStyleToggle
+            | CommandId::ScriptNoteStyleClear | CommandId::ScriptNoteRunFormattingSet => DesktopUnavailableReason::Selection,
             _ => DesktopUnavailableReason::ModalBlocked,
         }
     }

@@ -6,6 +6,7 @@ use scriptcraft_commands::{
     Command, HorizontalDirection, LineEdge, ScriptNoteFieldValue, ScriptNoteIdValue,
     ScriptNoteNavigationValue, ScriptNoteSelectionValue, ScriptNoteTextEditValue,
     ScriptNoteTextOperationValue, ScriptNoteTextPositionValue, ScriptNoteTimestampValue,
+    TitleTextStyle,
 };
 use scriptcraft_layout::{Caret, ScriptNoteLayout};
 use scriptcraft_model::StableId;
@@ -25,6 +26,20 @@ fn push_text_edit(result: &mut InputResult, operation: ScriptNoteTextOperationVa
             edit: ScriptNoteTextEditValue { operation, modified },
         }),
         None => result.timestamp_error = true,
+    }
+}
+
+fn push_style_toggle(result: &mut InputResult, style: TitleTextStyle) {
+    match ScriptNoteTimestampValue::new(scriptcraft_fdx::current_timestamp()) {
+        Ok(modified) => result.commands.push(Command::ScriptNoteStyleToggle { style, modified }),
+        Err(_) => result.timestamp_error = true,
+    }
+}
+
+fn push_style_clear(result: &mut InputResult) {
+    match ScriptNoteTimestampValue::new(scriptcraft_fdx::current_timestamp()) {
+        Ok(modified) => result.commands.push(Command::ScriptNoteStyleClear { modified }),
+        Err(_) => result.timestamp_error = true,
     }
 }
 
@@ -115,6 +130,24 @@ pub(crate) fn handle(
             egui::Event::Key { key, pressed: true, modifiers: key_modifiers, .. } => {
                 if state.ime_active || ime_frame { continue; }
                 let shortcut = key_modifiers.command || (key_modifiers.ctrl && !cfg!(target_os = "macos"));
+                if shortcut && !key_modifiers.alt && field == ScriptNoteField::Body {
+                    let style = match (key, key_modifiers.shift) {
+                        (Key::B, false) => Some(TitleTextStyle::Bold),
+                        (Key::I, false) => Some(TitleTextStyle::Italics),
+                        (Key::U, false) => Some(TitleTextStyle::Underline),
+                        (Key::K, false) => Some(TitleTextStyle::AllCaps),
+                        (Key::X, true) => Some(TitleTextStyle::Strikethrough),
+                        _ => None,
+                    };
+                    if let Some(style) = style {
+                        push_style_toggle(&mut result, style);
+                        continue;
+                    }
+                    if *key == Key::T && !key_modifiers.shift {
+                        push_style_clear(&mut result);
+                        continue;
+                    }
+                }
                 if shortcut {
                     match key {
                         Key::A => result.commands.push(select_all(note, field, value)),

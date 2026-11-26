@@ -31,7 +31,7 @@ const fn descriptor(
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 83] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 86] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -263,6 +263,9 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 83] = [
     descriptor(CommandId::ScriptNoteTextNavigate, "script-note", "horizontal direction or logical line edge; extend: bool"),
     descriptor(CommandId::ScriptNotePresent, "script-note", "note, move_caret, focus_body; host effect opens note viewport"),
     descriptor(CommandId::ScriptNoteDismiss, "script-note", "none; host effect closes note viewport"),
+    descriptor(CommandId::ScriptNoteStyleToggle, "script-note", "style, modified timestamp; active Body selection/caret"),
+    descriptor(CommandId::ScriptNoteStyleClear, "script-note", "modified timestamp; clear supported Body run styles"),
+    descriptor(CommandId::ScriptNoteRunFormattingSet, "script-note", "patch: bounded Font/Size/Color/Background, modified timestamp; active Body selection/caret"),
 ];
 
 pub fn descriptor_for(id: CommandId) -> Option<&'static CommandDescriptor> {

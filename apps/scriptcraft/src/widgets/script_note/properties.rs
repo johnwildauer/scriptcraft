@@ -26,8 +26,6 @@ const COLOR_VIEWPORT_NAME: &str = "scriptcraft-script-note-color-menu";
 const TYPE_VIEWPORT_NAME: &str = "scriptcraft-script-note-type-menu";
 const COLOR_ROW_HEIGHT: f32 = 22.0;
 const TYPE_ROW_HEIGHT: f32 = 24.0;
-const MENU_HORIZONTAL_PADDING: f32 = 20.0;
-const MENU_VERTICAL_PADDING: f32 = 16.0;
 const MENU_MAX_WIDTH: f32 = 360.0;
 
 /// The note palette is None, Black, followed by the existing twelve menu colors.
@@ -114,12 +112,14 @@ pub(crate) fn flush_pending_closes(
         state.color_menu_close_pending = false;
         state.color_menu_focused = false;
         state.color_menu_focus_pending = false;
+        state.color_menu_measured_size = None;
     }
     if state.type_menu_close_pending {
         close_type_viewport(ctx);
         state.type_menu_close_pending = false;
         state.type_menu_focused = false;
         state.type_menu_focus_pending = false;
+        state.type_menu_measured_size = None;
     }
 }
 
@@ -131,6 +131,12 @@ pub(crate) fn show_native_menus(
 ) -> Option<PropertyMenuAction> {
     if state.new_type_dialog_open {
         return None;
+    }
+    if !state.color_menu_open {
+        state.color_menu_measured_size = None;
+    }
+    if !state.type_menu_open {
+        state.type_menu_measured_size = None;
     }
     let mut action = None;
     if state.color_menu_open {
@@ -155,6 +161,7 @@ fn menu_metrics(
     labels: impl Iterator<Item = String>,
     font_size: f32,
     extra_width: f32,
+    popup_horizontal_margin: f32,
 ) -> f32 {
     let font = FontId::proportional(font_size);
     let widest = ctx.fonts_mut(|fonts| {
@@ -162,7 +169,38 @@ fn menu_metrics(
             .map(|label| fonts.layout_no_wrap(label, font.clone(), Color32::WHITE).size().x)
             .fold(0.0_f32, f32::max)
     });
-    (widest + extra_width + MENU_HORIZONTAL_PADDING).clamp(128.0, MENU_MAX_WIDTH)
+    (widest + extra_width + popup_horizontal_margin).clamp(128.0, MENU_MAX_WIDTH)
+}
+
+fn popup_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::popup(style).shadow(egui::Shadow::NONE)
+}
+
+fn popup_total_margins(style: &egui::Style) -> (f32, f32) {
+    let margin = popup_frame(style).total_margin();
+    (
+        margin.left + margin.right,
+        margin.top + margin.bottom,
+    )
+}
+
+fn reconcile_menu_size(
+    ctx: &egui::Context,
+    id: egui::ViewportId,
+    native_size: Vec2,
+    popup_size: Option<Vec2>,
+    measured_size: &mut Option<Vec2>,
+) {
+    let Some(popup_size) = popup_size.filter(|size| {
+        size.x.is_finite() && size.y.is_finite() && size.x > 0.0 && size.y > 0.0
+    }) else {
+        return;
+    };
+
+    *measured_size = Some(popup_size);
+    if popup_size != native_size {
+        ctx.send_viewport_cmd_to(id, egui::ViewportCommand::InnerSize(popup_size));
+    }
 }
 
 fn menu_viewport_geometry(
@@ -204,21 +242,27 @@ fn show_color_viewport(
     projection: ScriptNoteColorProjection,
     action: &mut Option<PropertyMenuAction>,
 ) {
+    let (horizontal_margin, vertical_margin) =
+        popup_total_margins(root_ctx.style().as_ref());
     let desired_width = menu_metrics(
         root_ctx,
         std::iter::once("None".to_owned()).chain(color_choices().map(|color| color.label().to_owned())),
         12.0,
         54.0,
+        horizontal_margin,
     );
     let color_row_count = color_choices().count() + 1;
-    let desired_height = MENU_VERTICAL_PADDING
+    let row_gap = 2.0;
+    let desired_height = vertical_margin
         + color_row_count as f32 * COLOR_ROW_HEIGHT
-        + color_row_count.saturating_sub(1) as f32 * 2.0;
+        + color_row_count.saturating_sub(1) as f32 * row_gap;
+    let desired_size = state.color_menu_measured_size
+        .unwrap_or_else(|| Vec2::new(desired_width, desired_height));
     let (builder, size) = menu_viewport_geometry(
         state,
         color_viewport_id(),
-        desired_width,
-        desired_height,
+        desired_size.x,
+        desired_size.y,
         super::geometry::HORIZONTAL_INSET,
     );
     let was_focused = state.color_menu_focused;
@@ -226,6 +270,7 @@ fn show_color_viewport(
     let mut focused = false;
     let mut dismissed = false;
     let mut unsupported = false;
+    let mut popup_size = None;
     root_ctx.show_viewport_immediate(color_viewport_id(), builder, |viewport_ui, class| {
         if class != egui::ViewportClass::Immediate {
             unsupported = true;
@@ -237,14 +282,14 @@ fn show_color_viewport(
         ui.set_min_size(size);
         ui.style_mut().visuals.menu_corner_radius =
             egui::CornerRadius::same(super::geometry::CARD_RADIUS as u8);
-        let popup = egui::Frame::popup(ui.style()).show(&mut ui, |ui| {
-            ui.set_min_width((size.x - MENU_HORIZONTAL_PADDING).max(0.0));
+        let popup = popup_frame(ui.style()).show(&mut ui, |ui| {
+            ui.set_min_width((size.x - horizontal_margin).max(0.0));
             ui.spacing_mut().button_padding = Vec2::new(4.0, 0.0);
-            ui.spacing_mut().item_spacing = Vec2::new(6.0, 2.0);
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, row_gap);
             ui.spacing_mut().interact_size.y = COLOR_ROW_HEIGHT;
             egui::ScrollArea::vertical()
                 .id_salt("script-note-color-rows")
-                .max_height((size.y - MENU_VERTICAL_PADDING).max(1.0))
+                .max_height((size.y - vertical_margin).max(1.0))
                 .show(ui, |ui| {
                     let none_check = crate::chrome::menu::menu_check_atom(
                         projection == ScriptNoteColorProjection::ThemeDefault,
@@ -263,7 +308,7 @@ fn show_color_viewport(
                             .frame(false)
                             .fill(Color32::TRANSPARENT)
                             .stroke(egui::Stroke::NONE)
-                            .min_size(Vec2::new((size.x - MENU_HORIZONTAL_PADDING).max(0.0), COLOR_ROW_HEIGHT)),
+                            .min_size(Vec2::new((size.x - horizontal_margin).max(0.0), COLOR_ROW_HEIGHT)),
                     );
                     none_row.widget_info(|| egui::WidgetInfo::labeled(
                         egui::WidgetType::Button,
@@ -290,7 +335,7 @@ fn show_color_viewport(
                                 .frame(false)
                                 .fill(Color32::TRANSPARENT)
                                 .stroke(egui::Stroke::NONE)
-                                .min_size(Vec2::new((size.x - MENU_HORIZONTAL_PADDING).max(0.0), COLOR_ROW_HEIGHT)),
+                                .min_size(Vec2::new((size.x - horizontal_margin).max(0.0), COLOR_ROW_HEIGHT)),
                         );
                         row.widget_info(|| egui::WidgetInfo::labeled(
                             egui::WidgetType::Button,
@@ -303,6 +348,7 @@ fn show_color_viewport(
                     }
                 });
         });
+        popup_size = Some(popup.response.rect.size());
         dismissed = ctx.input(|input| {
             input.viewport().close_requested()
                 || input.key_pressed(egui::Key::Escape)
@@ -314,6 +360,15 @@ fn show_color_viewport(
     if selected.is_some() || dismissed || unsupported || (was_focused && !focused) {
         state.color_menu_open = false;
         state.color_menu_close_pending = true;
+        state.color_menu_measured_size = None;
+    } else {
+        reconcile_menu_size(
+            root_ctx,
+            color_viewport_id(),
+            size,
+            popup_size,
+            &mut state.color_menu_measured_size,
+        );
     }
     if let Some(selected) = selected { *action = Some(selected); }
 }
@@ -325,21 +380,26 @@ fn show_type_viewport(
     types: &[String],
     action: &mut Option<PropertyMenuAction>,
 ) {
+    let (horizontal_margin, vertical_margin) =
+        popup_total_margins(root_ctx.style().as_ref());
     let labels = std::iter::once("None".to_owned())
         .chain(types.iter().cloned())
         .chain(std::iter::once("New Type...".to_owned()));
-    let desired_width = menu_metrics(root_ctx, labels, 13.0, 34.0);
+    let desired_width = menu_metrics(root_ctx, labels, 13.0, 34.0, horizontal_margin);
     let row_count = types.len() + 2;
     let row_gap = root_ctx.style().spacing.item_spacing.y;
-    let desired_height = MENU_VERTICAL_PADDING
+    let separator_height = root_ctx.style().visuals.widgets.noninteractive.bg_stroke.width;
+    let desired_height = vertical_margin
         + row_count as f32 * TYPE_ROW_HEIGHT
-        + row_count.saturating_sub(1) as f32 * row_gap
-        + 9.0;
+        + row_count as f32 * row_gap
+        + separator_height;
+    let desired_size = state.type_menu_measured_size
+        .unwrap_or_else(|| Vec2::new(desired_width, desired_height));
     let (builder, size) = menu_viewport_geometry(
         state,
         type_viewport_id(),
-        desired_width,
-        desired_height,
+        desired_size.x,
+        desired_size.y,
         super::geometry::HORIZONTAL_INSET + 58.0,
     );
     let was_focused = state.type_menu_focused;
@@ -347,6 +407,7 @@ fn show_type_viewport(
     let mut focused = false;
     let mut dismissed = false;
     let mut unsupported = false;
+    let mut popup_size = None;
     root_ctx.show_viewport_immediate(type_viewport_id(), builder, |viewport_ui, class| {
         if class != egui::ViewportClass::Immediate {
             unsupported = true;
@@ -358,17 +419,18 @@ fn show_type_viewport(
         ui.set_min_size(size);
         ui.style_mut().visuals.menu_corner_radius =
             egui::CornerRadius::same(super::geometry::CARD_RADIUS as u8);
-        let popup = egui::Frame::popup(ui.style()).show(&mut ui, |ui| {
-            ui.set_min_width((size.x - MENU_HORIZONTAL_PADDING).max(0.0));
+        let popup = popup_frame(ui.style()).show(&mut ui, |ui| {
+            ui.set_min_width((size.x - horizontal_margin).max(0.0));
             ui.spacing_mut().button_padding = Vec2::new(4.0, 0.0);
+            ui.spacing_mut().item_spacing.y = row_gap;
             ui.spacing_mut().interact_size.y = TYPE_ROW_HEIGHT;
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
             egui::ScrollArea::vertical()
                 .id_salt("script-note-type-rows")
-                .max_height((size.y - MENU_VERTICAL_PADDING).max(1.0))
+                .max_height((size.y - vertical_margin).max(1.0))
                 .show(ui, |ui| {
                     let option_font = FontId::proportional(13.0);
-                    let row_width = (size.x - MENU_HORIZONTAL_PADDING).max(0.0);
+                    let row_width = (size.x - horizontal_margin).max(0.0);
                     let none_choice = TypeMenuChoice::None;
                     let none_row = add_type_row(
                         ui,
@@ -408,6 +470,7 @@ fn show_type_viewport(
                     }
                 });
         });
+        popup_size = Some(popup.response.rect.size());
         dismissed = ctx.input(|input| {
             input.viewport().close_requested()
                 || input.key_pressed(egui::Key::Escape)
@@ -419,6 +482,15 @@ fn show_type_viewport(
     if selected.is_some() || dismissed || unsupported || (was_focused && !focused) {
         state.type_menu_open = false;
         state.type_menu_close_pending = true;
+        state.type_menu_measured_size = None;
+    } else {
+        reconcile_menu_size(
+            root_ctx,
+            type_viewport_id(),
+            size,
+            popup_size,
+            &mut state.type_menu_measured_size,
+        );
     }
     if let Some(choice) = selected { *action = Some(PropertyMenuAction::Type(choice)); }
 }

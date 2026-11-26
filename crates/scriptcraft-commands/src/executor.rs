@@ -6,7 +6,7 @@
 use scriptcraft_model::{Position as CorePosition, Selection as CoreSelection};
 use scriptcraft_session::editing::{
     ApplyTemplateError, ApplyTemplateOutcome, BeatSelection, BeatTextField, EditError, EditingSession,
-    ScriptNoteColorUpdate, ScriptNoteCreationInput, ScriptNoteSelection,
+    ScriptNoteColorUpdate, ScriptNoteCreationInput, ScriptNoteField, ScriptNoteSelection,
 };
 
 use crate::{Command, CommandId, EditorSurface, PointerPhase, PositionError, SelectionError};
@@ -232,6 +232,27 @@ pub fn execute_editor_command_on_surface(
             } else {
                 session.navigate_script_note_horizontal(horizontal, *extend)
             }
+        }
+        Command::ScriptNoteStyleToggle { style, modified } => {
+            if !session.script_note_selection_is_valid() || !matches!(session.script_note_selection(),
+                ScriptNoteSelection::Text { field: ScriptNoteField::Body, .. }) {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            session.toggle_script_note_run_style(style.as_core(), modified.as_str().to_owned())
+        }
+        Command::ScriptNoteStyleClear { modified } => {
+            if !session.script_note_selection_is_valid() || !matches!(session.script_note_selection(),
+                ScriptNoteSelection::Text { field: ScriptNoteField::Body, .. }) {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            session.clear_script_note_run_styles(modified.as_str().to_owned())
+        }
+        Command::ScriptNoteRunFormattingSet { patch, modified } => {
+            if !session.script_note_selection_is_valid() || !matches!(session.script_note_selection(),
+                ScriptNoteSelection::Text { field: ScriptNoteField::Body, .. }) {
+                return CommandOutcome::Unavailable(UnavailableReason::Selection);
+            }
+            session.set_script_note_run_formatting(patch.as_core(), modified.as_str().to_owned())
         }
         Command::ScriptNotePresent { .. } | Command::ScriptNoteDismiss => {
             return rejected(command);

@@ -193,9 +193,100 @@ pub(crate) fn project_for_target(
     session: &EditingSession,
     surface: EditorSurface,
     beat_target: bool,
+    note_target: bool,
 ) -> FormattingMenuProjection {
-    if beat_target && surface == EditorSurface::Body { project_beat(session) }
+    if note_target && surface == EditorSurface::Body { project_script_note(session) }
+    else if beat_target && surface == EditorSurface::Body { project_beat(session) }
     else { project(session, surface) }
+}
+
+fn project_script_note(session: &EditingSession) -> FormattingMenuProjection {
+    use scriptcraft_session::editing::{ScriptNoteField, ScriptNoteSelection};
+    let mut projection = FormattingMenuProjection::default();
+    let ScriptNoteSelection::Text { note, field: ScriptNoteField::Body, anchor, focus } = session.script_note_selection() else {
+        return projection;
+    };
+    let Some(note) = session.project().script_notes().get(note) else { return projection };
+    let (start, end) = if anchor <= focus { (*anchor, *focus) } else { (*focus, *anchor) };
+    let base = ElementFontSpec {
+        family: "Arial".to_owned(), size: 12, bold: false, italic: false,
+        underline: false, all_caps: false, hidden_text: false, color: None,
+        adornment_style: 0, revision_id: 0,
+    };
+    let mut runs = Vec::new();
+    if start == end {
+        if let Some(paragraph) = note.paragraphs.get(start.paragraph) {
+            if let Some(mut values) = run_values(attributes_at(&paragraph.text, &paragraph.runs, start.offset), &base) {
+                apply_typing_patch(&mut values, session.script_note_typing_formatting());
+                values.styles = session.script_note_typing_style();
+                runs.push(values);
+            }
+        }
+    } else if end.paragraph < note.paragraphs.len() {
+        for index in start.paragraph..=end.paragraph {
+            let paragraph = &note.paragraphs[index];
+            let range = (if index == start.paragraph { start.offset } else { 0 })..
+                (if index == end.paragraph { end.offset } else { paragraph.text.len() });
+            if let Some(values) = values_for_range(&paragraph.text, &paragraph.runs, range, &base) {
+                runs.extend(values);
+            } else {
+                return projection;
+            }
+        }
+    } else { return projection; }
+
+    if uniform_field(&runs, |value| Some(value.size_direct)) == Some(false) {
+        projection.checked_actions.push(MenuAction::ClearInlineSize);
+    }
+    if let Some(size) = uniform_field(&runs, |value| value.size.filter(|_| value.size_direct)) {
+        for value in [InlineSizeValue::Seven, InlineSizeValue::Eight, InlineSizeValue::Nine,
+            InlineSizeValue::Ten, InlineSizeValue::Twelve, InlineSizeValue::Fourteen,
+            InlineSizeValue::Eighteen, InlineSizeValue::TwentyFour] {
+            if FixedPoint::from_points(i64::from(value.as_core().points())) == size {
+                projection.checked_actions.push(MenuAction::SetInlineSize(value));
+            }
+        }
+    }
+    if uniform_field(&runs, |value| Some(value.font_direct)) == Some(false) {
+        projection.checked_actions.push(MenuAction::SetInlineFont(InlineFontValue::ElementDefault));
+    }
+    if let Some(font) = uniform_field(&runs, |value| Some(value.font.clone())) {
+        for value in [InlineFontValue::CourierFinalDraft, InlineFontValue::CourierPrime,
+            InlineFontValue::Arial, InlineFontValue::TimesNewRoman] {
+            if font == inline_font_name(value).unwrap_or_default() {
+                projection.checked_actions.push(MenuAction::SetInlineFont(value));
+            }
+        }
+    }
+    if let Some(color) = uniform_field(&runs, |value| Some(value.color.clone())) {
+        match color {
+            None => projection.checked_actions.push(MenuAction::SetInlineColor(InlineColorValue::ElementDefault)),
+            Some(value) => if let Some(color) = InlineColor::from_normalized_fdx_value(&value)
+                .filter(|color| InlineColor::MENU_PALETTE.contains(color)) {
+                projection.checked_actions.push(MenuAction::SetInlineColor(InlineColorValue::from_core(color)));
+            },
+        }
+    }
+    if let Some(background) = uniform_field(&runs, |value| Some(value.background.clone())) {
+        match background {
+            None => projection.checked_actions.push(MenuAction::SetInlineBackground(InlineColorValue::ElementDefault)),
+            Some(value) => if let Some(color) = InlineColor::from_normalized_fdx_value(&value)
+                .filter(|color| InlineColor::MENU_PALETTE.contains(color)) {
+                projection.checked_actions.push(MenuAction::SetInlineBackground(InlineColorValue::from_core(color)));
+            },
+        }
+    }
+    for (style, value) in [(TitleTextStyle::Bold, RunStyle::Bold),
+        (TitleTextStyle::Italics, RunStyle::Italics), (TitleTextStyle::Underline, RunStyle::Underline),
+        (TitleTextStyle::AllCaps, RunStyle::AllCaps), (TitleTextStyle::Strikethrough, RunStyle::Strikethrough)] {
+        if uniform_field(&runs, |run| Some(run.styles.contains(value))) == Some(true) {
+            projection.checked_actions.push(MenuAction::ToggleStyle(style));
+        }
+    }
+    if uniform_field(&runs, |run| Some(run.styles == RunStyleFlags::default())) == Some(true) {
+        projection.checked_actions.push(MenuAction::ClearStyles);
+    }
+    projection
 }
 
 fn project_beat(session: &EditingSession) -> FormattingMenuProjection {

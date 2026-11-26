@@ -102,6 +102,8 @@ impl EditingSession {
             beat_selection: self.beat_selection.clone(),
             beat_typing_style: self.beat_typing_style,
             beat_typing_formatting: self.beat_typing_formatting,
+            script_note_typing_style: self.script_note_typing_style,
+            script_note_typing_formatting: self.script_note_typing_formatting,
             title_typing_style: self.title_typing_style,
             body_typing_style: self.body_typing_style,
             body_typing_formatting: self.body_typing_formatting,

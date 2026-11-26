@@ -33,6 +33,8 @@ pub struct EditingSession {
     pub(super) redo_note_selections: Vec<super::ScriptNoteSelection>,
     pub(super) beat_typing_style: RunStyleFlags,
     pub(super) beat_typing_formatting: InlineRunFormattingPatch,
+    pub(super) script_note_typing_style: RunStyleFlags,
+    pub(super) script_note_typing_formatting: InlineRunFormattingPatch,
     pub(super) title_typing_style: RunStyleFlags,
     pub(super) body_typing_style: RunStyleFlags,
     pub(super) body_typing_formatting: InlineRunFormattingPatch,
@@ -70,6 +72,8 @@ impl PartialEq for EditingSession {
             && self.redo_note_selections == other.redo_note_selections
             && self.beat_typing_style == other.beat_typing_style
             && self.beat_typing_formatting == other.beat_typing_formatting
+            && self.script_note_typing_style == other.script_note_typing_style
+            && self.script_note_typing_formatting == other.script_note_typing_formatting
             && self.title_typing_style == other.title_typing_style
             && self.body_typing_style == other.body_typing_style
             && self.body_typing_formatting == other.body_typing_formatting
@@ -154,6 +158,8 @@ impl EditingSession {
             redo_note_selections: Vec::new(),
             beat_typing_style: RunStyleFlags::default(),
             beat_typing_formatting: InlineRunFormattingPatch::default(),
+            script_note_typing_style: RunStyleFlags::default(),
+            script_note_typing_formatting: InlineRunFormattingPatch::default(),
             title_typing_style,
             body_typing_style,
             body_typing_formatting: InlineRunFormattingPatch::default(),
@@ -236,6 +242,12 @@ impl EditingSession {
 
     /// Transient Beat body inline-formatting patch; never persisted or dirtied.
     pub fn beat_typing_formatting(&self) -> InlineRunFormattingPatch { self.beat_typing_formatting }
+
+    /// Transient ScriptNote Body style at the active collapsed text caret.
+    pub fn script_note_typing_style(&self) -> RunStyleFlags { self.script_note_typing_style }
+
+    /// Transient ScriptNote Body inline-formatting patch; never persisted or dirtied.
+    pub fn script_note_typing_formatting(&self) -> InlineRunFormattingPatch { self.script_note_typing_formatting }
 
     pub const fn dirty(&self) -> bool {
         self.dirty

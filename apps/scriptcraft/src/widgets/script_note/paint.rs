@@ -1,7 +1,7 @@
 //! Fixed card chrome and measured rich-text painting.
 
 use super::{geometry::CardRegions, state::ScriptNoteWorkspaceState};
-use crate::{chrome::theme::PagePalette, presentation::{document_font::PreparedDocumentFonts, span_paint::resolve_span_paint}};
+use crate::{chrome::theme::PagePalette, presentation::{document_font::PreparedDocumentFonts, geometry, span_paint::resolve_span_paint}};
 use eframe::egui::{self, Color32, FontFamily, FontId, Painter, Pos2, Rect, Stroke, StrokeKind};
 use scriptcraft_layout::{LayoutLine, ScriptNoteLayout, ScriptNoteTitleProjection};
 use scriptcraft_model::ScriptNote;
@@ -107,33 +107,34 @@ fn paint_line(
     subdued: bool,
 ) {
     let painter = clip.map_or_else(|| painter.clone(), |rect| painter.with_clip_rect(rect));
-    for span in line.spans.iter() {
+    let Ok(projection) = geometry::project_line(line, 1.0) else { return };
+    for span in &projection.spans {
         let Some(style) = resolve_span_paint(
-            &span.resolved_text_style,
-            span.resolved_text_style.size.to_points_f32(),
+            &span.core.resolved_text_style,
+            span.core.resolved_text_style.size.to_points_f32(),
             palette,
             prepared,
         ) else { continue };
         let color = if subdued { palette.subdued_text } else { style.color };
-        let galley = painter.layout_no_wrap(span.display_text.to_string(), style.font, color);
-        let pos = Pos2::new(
-            offset.x + span.geometry.x.to_points_f32(),
-            offset.y + span.geometry.y.to_points_f32() - vertical_scroll,
+        let Ok(galley) = geometry::canonical_singleline_galley(
+            &painter,
+            &span.core.display_text,
+            &style.font,
+            &span.display_boundary_offsets,
+            color,
+            projection.line_box_height,
+            projection.baseline_y - projection.line_box_top,
+        ) else { return };
+        painter.galley(
+            Pos2::new(offset.x + span.origin_x, offset.y + projection.line_box_top - vertical_scroll),
+            galley,
+            color,
         );
-        let galley_height = galley.size().y;
-        painter.galley(pos, galley, color);
-        let baseline = pos.y + galley_height * 0.78;
-        if span.underline {
-            painter.line_segment(
-                [Pos2::new(pos.x, baseline + 1.0), Pos2::new(pos.x + span.geometry.width.to_points_f32(), baseline + 1.0)],
-                Stroke::new(1.0, color),
-            );
-        }
-        if span.strikethrough {
-            painter.line_segment(
-                [Pos2::new(pos.x, pos.y + galley_height * 0.48), Pos2::new(pos.x + span.geometry.width.to_points_f32(), pos.y + galley_height * 0.48)],
-                Stroke::new(1.0, color),
-            );
+        for decoration in [span.core.underline_geometry, span.core.strikethrough_geometry].into_iter().flatten() {
+            let Ok(rect) = geometry::project_decoration_rect(span, decoration, projection.baseline_y, 1.0) else { return };
+            if rect.is_positive() {
+                painter.rect_filled(rect.translate(egui::vec2(offset.x, offset.y - vertical_scroll)), 0.0, color);
+            }
         }
     }
 }
@@ -146,6 +147,7 @@ fn paint_title_projection(
     clip: Rect,
 ) {
     paint_line(painter, &projection.prefix, Pos2::ZERO, 0.0, prepared, palette, Some(clip), false);
+    let Ok(line) = geometry::project_line(&projection.prefix, 1.0) else { return };
     let ellipsis = &projection.ellipsis;
     let Some(style) = resolve_span_paint(
         &ellipsis.resolved_text_style,
@@ -153,8 +155,17 @@ fn paint_title_projection(
         palette,
         prepared,
     ) else { return };
-    let galley = painter.layout_no_wrap(ellipsis.text.to_owned(), style.font, style.color);
-    let position = Pos2::new(ellipsis.geometry.x.to_points_f32(), ellipsis.geometry.y.to_points_f32());
+    let boundaries = [0.0, ellipsis.geometry.width.to_points_f32()];
+    let Ok(galley) = geometry::canonical_singleline_galley(
+        painter,
+        ellipsis.text,
+        &style.font,
+        &boundaries,
+        style.color,
+        line.line_box_height,
+        line.baseline_y - line.line_box_top,
+    ) else { return };
+    let position = Pos2::new(ellipsis.geometry.x.to_points_f32(), line.line_box_top);
     painter.with_clip_rect(clip).galley(position, galley, style.color);
 }
 

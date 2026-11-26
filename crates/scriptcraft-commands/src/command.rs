@@ -10,6 +10,7 @@ use super::{
     ParagraphFormattingPatchValue,
     BeatCardIdValue, BeatPointValue, BeatRectValue, BeatSelectionValue,
     BeatTextEditValue, BeatNavigationValue,
+    ScriptNoteTimestampValue,
 };
 
 /// Stable identifier for a command. Identifiers are intentionally independent
@@ -99,11 +100,14 @@ pub enum CommandId {
     ScriptNoteTextNavigate,
     ScriptNotePresent,
     ScriptNoteDismiss,
+    ScriptNoteStyleToggle,
+    ScriptNoteStyleClear,
+    ScriptNoteRunFormattingSet,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 83] = [
+    pub const ALL: [Self; 86] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -187,6 +191,9 @@ impl CommandId {
         Self::ScriptNoteTextNavigate,
         Self::ScriptNotePresent,
         Self::ScriptNoteDismiss,
+        Self::ScriptNoteStyleToggle,
+        Self::ScriptNoteStyleClear,
+        Self::ScriptNoteRunFormattingSet,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -274,6 +281,9 @@ impl CommandId {
             Self::ScriptNoteTextNavigate => "script-note.text.navigate",
             Self::ScriptNotePresent => "script-note.present",
             Self::ScriptNoteDismiss => "script-note.dismiss",
+            Self::ScriptNoteStyleToggle => "script-note.style.toggle",
+            Self::ScriptNoteStyleClear => "script-note.style.clear",
+            Self::ScriptNoteRunFormattingSet => "script-note.run-formatting.set",
         }
     }
 }
@@ -547,6 +557,12 @@ pub enum Command {
     ScriptNotePresent { presentation: super::ScriptNotePresentValue },
     #[serde(rename = "script-note.dismiss")]
     ScriptNoteDismiss,
+    #[serde(rename = "script-note.style.toggle")]
+    ScriptNoteStyleToggle { style: TitleTextStyle, modified: ScriptNoteTimestampValue },
+    #[serde(rename = "script-note.style.clear")]
+    ScriptNoteStyleClear { modified: ScriptNoteTimestampValue },
+    #[serde(rename = "script-note.run-formatting.set")]
+    ScriptNoteRunFormattingSet { patch: RunFormattingPatchValue, modified: ScriptNoteTimestampValue },
 }
 
 impl Command {
@@ -663,6 +679,9 @@ impl Command {
             Self::ScriptNoteTextNavigate { .. } => CommandId::ScriptNoteTextNavigate,
             Self::ScriptNotePresent { .. } => CommandId::ScriptNotePresent,
             Self::ScriptNoteDismiss => CommandId::ScriptNoteDismiss,
+            Self::ScriptNoteStyleToggle { .. } => CommandId::ScriptNoteStyleToggle,
+            Self::ScriptNoteStyleClear { .. } => CommandId::ScriptNoteStyleClear,
+            Self::ScriptNoteRunFormattingSet { .. } => CommandId::ScriptNoteRunFormattingSet,
         }
     }
 }

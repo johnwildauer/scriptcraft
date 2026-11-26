@@ -289,7 +289,7 @@ fn native_options(initial_title: &str) -> Result<eframe::NativeOptions, String> 
                 window_state.top as f32,
             ))
             .with_decorations(true)
-            .with_transparent(false)
+            .with_transparent(true)
             .with_title_shown(true)
             .with_titlebar_shown(true)
             .with_fullsize_content_view(false)
@@ -444,6 +444,7 @@ pub(crate) fn run() -> eframe::Result {
                             &app.session,
                             app.active_editor_surface,
                             app.root_document_view == crate::app::RootDocumentView::BeatBoard,
+                            app.script_note_body_owns_input(),
                         );
                         app.native_menu = Some(
                             macos_menu::NativeMenuController::install(

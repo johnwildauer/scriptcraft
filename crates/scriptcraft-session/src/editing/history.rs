@@ -16,6 +16,8 @@ pub(super) struct Snapshot {
     pub(super) beat_selection: super::BeatSelection,
     pub(super) beat_typing_style: RunStyleFlags,
     pub(super) beat_typing_formatting: InlineRunFormattingPatch,
+    pub(super) script_note_typing_style: RunStyleFlags,
+    pub(super) script_note_typing_formatting: InlineRunFormattingPatch,
     pub(super) title_typing_style: RunStyleFlags,
     pub(super) body_typing_style: RunStyleFlags,
     pub(super) body_typing_formatting: InlineRunFormattingPatch,
@@ -53,6 +55,8 @@ impl EditingSession {
             beat_selection: self.beat_selection.clone(),
             beat_typing_style: self.beat_typing_style,
             beat_typing_formatting: self.beat_typing_formatting,
+            script_note_typing_style: self.script_note_typing_style,
+            script_note_typing_formatting: self.script_note_typing_formatting,
             title_typing_style: self.title_typing_style,
             body_typing_style: self.body_typing_style,
             body_typing_formatting: self.body_typing_formatting,
@@ -70,6 +74,8 @@ impl EditingSession {
         self.script_note_selection = snapshot_note_selection;
         self.beat_typing_style = snapshot.beat_typing_style;
         self.beat_typing_formatting = snapshot.beat_typing_formatting;
+        self.script_note_typing_style = snapshot.script_note_typing_style;
+        self.script_note_typing_formatting = snapshot.script_note_typing_formatting;
         self.title_typing_style = snapshot.title_typing_style;
         self.body_typing_style = snapshot.body_typing_style;
         self.body_typing_formatting = snapshot.body_typing_formatting;
@@ -103,6 +109,8 @@ impl EditingSession {
             beat_selection: self.beat_selection.clone(),
             beat_typing_style: self.beat_typing_style,
             beat_typing_formatting: self.beat_typing_formatting,
+            script_note_typing_style: self.script_note_typing_style,
+            script_note_typing_formatting: self.script_note_typing_formatting,
             title_typing_style: self.title_typing_style,
             body_typing_style: self.body_typing_style,
             body_typing_formatting: self.body_typing_formatting,
@@ -121,6 +129,8 @@ impl EditingSession {
         self.script_note_selection = snapshot_note_selection;
         self.beat_typing_style = snapshot.beat_typing_style;
         self.beat_typing_formatting = snapshot.beat_typing_formatting;
+        self.script_note_typing_style = snapshot.script_note_typing_style;
+        self.script_note_typing_formatting = snapshot.script_note_typing_formatting;
         self.title_typing_style = snapshot.title_typing_style;
         self.body_typing_style = snapshot.body_typing_style;
         self.body_typing_formatting = snapshot.body_typing_formatting;

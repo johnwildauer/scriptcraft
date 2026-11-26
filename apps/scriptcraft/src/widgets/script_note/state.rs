@@ -1,4 +1,5 @@
 use scriptcraft_model::{formatted_text::InlineColor, StableId};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct MarkerAnchor {
@@ -57,6 +58,8 @@ pub(crate) struct ScriptNoteWorkspaceState {
     pub(crate) color_menu_focus_pending: bool,
     pub(crate) type_menu_close_pending: bool,
     pub(crate) color_menu_close_pending: bool,
+    pub(crate) type_menu_measured_size: Option<eframe::egui::Vec2>,
+    pub(crate) color_menu_measured_size: Option<eframe::egui::Vec2>,
     pub(crate) new_type_dialog_open: bool,
     pub(crate) type_draft: String,
     pub(crate) type_return_focus: Option<scriptcraft_session::editing::ScriptNoteField>,
@@ -85,6 +88,7 @@ pub(crate) struct ScriptNoteWorkspaceState {
     pub(crate) focus_viewport_on_next_present: bool,
     pub(crate) viewport_focused: bool,
     pub(crate) reveal_pending: bool,
+    pub(crate) transition_attempted_viewports: HashSet<eframe::egui::ViewportId>,
 }
 
 impl Default for ScriptNoteWorkspaceState {
@@ -105,6 +109,8 @@ impl Default for ScriptNoteWorkspaceState {
             color_menu_focus_pending: false,
             type_menu_close_pending: false,
             color_menu_close_pending: false,
+            type_menu_measured_size: None,
+            color_menu_measured_size: None,
             new_type_dialog_open: false,
             type_draft: String::new(),
             type_return_focus: None,
@@ -133,11 +139,27 @@ impl Default for ScriptNoteWorkspaceState {
             focus_viewport_on_next_present: false,
             viewport_focused: false,
             reveal_pending: false,
+            transition_attempted_viewports: HashSet::new(),
         }
     }
 }
 
 impl ScriptNoteWorkspaceState {
+    pub(crate) fn reset_pending_transition_attempts(&mut self) {
+        if self.viewport_close_pending && self.open_note.is_none() {
+            self.transition_attempted_viewports
+                .remove(&super::viewport::viewport_id());
+        }
+        if self.color_menu_close_pending {
+            self.transition_attempted_viewports
+                .remove(&super::properties::color_viewport_id());
+        }
+        if self.type_menu_close_pending {
+            self.transition_attempted_viewports
+                .remove(&super::properties::type_viewport_id());
+        }
+    }
+
     pub(crate) fn present(&mut self, note: StableId, focus_body: bool) {
         self.type_menu_close_pending |= self.type_menu_open;
         self.color_menu_close_pending |= self.color_menu_open;
@@ -161,6 +183,8 @@ impl ScriptNoteWorkspaceState {
         self.viewport_focused = false;
         self.type_menu_open = false;
         self.color_menu_open = false;
+        self.type_menu_measured_size = None;
+        self.color_menu_measured_size = None;
         self.type_menu_focused = false;
         self.color_menu_focused = false;
         self.type_menu_focus_pending = false;
@@ -175,6 +199,7 @@ impl ScriptNoteWorkspaceState {
 
     pub(crate) fn dismiss(&mut self) -> bool {
         let was_open = self.open_note.take().is_some();
+        self.transition_attempted_viewports.clear();
         self.reveal_pending = false;
         self.type_dialog_close_pending |= self.new_type_dialog_open;
         self.type_menu_close_pending |= self.type_menu_open;
@@ -182,6 +207,8 @@ impl ScriptNoteWorkspaceState {
         self.focus_body_on_next_present = false;
         self.type_menu_open = false;
         self.color_menu_open = false;
+        self.type_menu_measured_size = None;
+        self.color_menu_measured_size = None;
         self.type_menu_focused = false;
         self.color_menu_focused = false;
         self.type_menu_focus_pending = false;

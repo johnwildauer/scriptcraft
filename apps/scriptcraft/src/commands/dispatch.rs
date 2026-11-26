@@ -107,6 +107,17 @@ pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
             },
         },
         CommandId::ScriptNoteDismiss => Command::ScriptNoteDismiss,
+        CommandId::ScriptNoteStyleToggle => Command::ScriptNoteStyleToggle {
+            style: scriptcraft_commands::TitleTextStyle::Bold,
+            modified: current_local_timestamp_value()?,
+        },
+        CommandId::ScriptNoteStyleClear => Command::ScriptNoteStyleClear {
+            modified: current_local_timestamp_value()?,
+        },
+        CommandId::ScriptNoteRunFormattingSet => Command::ScriptNoteRunFormattingSet {
+            patch: Default::default(),
+            modified: current_local_timestamp_value()?,
+        },
         _ => return None,
     })
 }
@@ -209,11 +220,21 @@ impl ScriptCraftApp {
                 outcome: DesktopCommandOutcome::Unavailable(DesktopUnavailableReason::Selection) };
         }
         let restore_focus = super::navigation::command_restores_editor_focus(command_id);
-        let command = route_to_beat_formatting(
-            route_to_focused_surface(command, origin, self.active_editor_surface()),
-            self.root_document_view,
-            origin,
-        );
+        let command = route_to_focused_surface(command, origin, self.active_editor_surface());
+        let command = route_to_beat_formatting(command, self.root_document_view, origin);
+        let command = if self.script_note_body_owns_input()
+            && matches!(command, Command::EditorStyleToggle { surface: EditorSurface::Body, .. }
+                | Command::EditorStyleClear { surface: EditorSurface::Body }
+                | Command::EditorRunFormattingSet { surface: EditorSurface::Body, .. })
+        {
+            let Some(modified) = current_local_timestamp_value() else {
+                self.post_diagnostic("ScriptNote timestamp could not be represented; note unchanged");
+                self.flush_pending_diagnostic_commands(ctx);
+                return DesktopCommandResult { command: command_id, origin,
+                    outcome: DesktopCommandOutcome::Rejected(CommandRejection::InvalidScriptNoteValue) };
+            };
+            route_to_script_note_formatting(command, modified)
+        } else { command };
         let outcome = self.dispatch_command_inner_with_pdf_handlers(
             command,
             ctx,
@@ -392,7 +413,10 @@ impl ScriptCraftApp {
             | Command::ScriptNotePropertiesSet { .. }
             | Command::ScriptNoteSelectionSet { .. }
             | Command::ScriptNoteTextEdit { .. }
-            | Command::ScriptNoteTextNavigate { .. }) => self.dispatch_editing_command(command, ctx),
+            | Command::ScriptNoteTextNavigate { .. }
+            | Command::ScriptNoteStyleToggle { .. }
+            | Command::ScriptNoteStyleClear { .. }
+            | Command::ScriptNoteRunFormattingSet { .. }) => self.dispatch_editing_command(command, ctx),
             command @ (Command::ScriptNotePresent { .. } | Command::ScriptNoteDismiss) => {
                 self.dispatch_script_note_host_command(command, ctx)
             }
@@ -478,6 +502,21 @@ impl ScriptCraftApp {
             .push_back(Command::UiStatusSet {
                 message: Some(message),
             });
+    }
+}
+
+fn route_to_script_note_formatting(
+    command: Command,
+    modified: ScriptNoteTimestampValue,
+) -> Command {
+    match command {
+        Command::EditorStyleToggle { surface: EditorSurface::Body, style } =>
+            Command::ScriptNoteStyleToggle { style, modified },
+        Command::EditorStyleClear { surface: EditorSurface::Body } =>
+            Command::ScriptNoteStyleClear { modified },
+        Command::EditorRunFormattingSet { surface: EditorSurface::Body, patch } =>
+            Command::ScriptNoteRunFormattingSet { patch, modified },
+        other => other,
     }
 }
 
