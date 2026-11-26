@@ -311,9 +311,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
 
 impl eframe::App for ScriptCraftApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        if self.script_note_workspace.open_note.is_some() {
-            [0.0, 0.0, 0.0, 0.0]
-        } else if self.root_document_view == RootDocumentView::BeatBoard {
+        if self.root_document_view == RootDocumentView::BeatBoard {
             self.theme_palette.script_workspace.background.to_normalized_gamma_f32()
         } else {
             script_view::chrome_clear_color(self.script_view_mode, self.theme_palette.script_workspace)
@@ -321,70 +319,6 @@ impl eframe::App for ScriptCraftApp {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        self.script_note_workspace.reset_pending_transition_attempts();
-        #[cfg(target_os = "windows")]
-        {
-            use crate::platform::windows::windows_script_note_viewports::{
-                self as transition_control, ScriptNoteViewportKind,
-            };
-            let viewport_kind = if raw_input.viewport_id
-                == crate::widgets::script_note::viewport::viewport_id()
-            {
-                Some(ScriptNoteViewportKind::Card)
-            } else if raw_input.viewport_id
-                == crate::widgets::script_note::properties::color_viewport_id()
-            {
-                Some(ScriptNoteViewportKind::ColorMenu)
-            } else if raw_input.viewport_id
-                == crate::widgets::script_note::properties::type_viewport_id()
-            {
-                Some(ScriptNoteViewportKind::TypeMenu)
-            } else if raw_input.viewport_id
-                == crate::widgets::script_note::type_dialog::viewport_id()
-            {
-                Some(ScriptNoteViewportKind::TypeDialog)
-            } else {
-                None
-            };
-            if let Some(viewport_kind) = viewport_kind {
-                let close_pending = match viewport_kind {
-                    ScriptNoteViewportKind::Card => {
-                        self.script_note_workspace.viewport_close_pending
-                            && self.script_note_workspace.open_note.is_none()
-                    }
-                    ScriptNoteViewportKind::ColorMenu => {
-                        self.script_note_workspace.color_menu_close_pending
-                    }
-                    ScriptNoteViewportKind::TypeMenu => {
-                        self.script_note_workspace.type_menu_close_pending
-                    }
-                    ScriptNoteViewportKind::TypeDialog => {
-                        self.script_note_workspace.type_dialog_close_pending
-                    }
-                };
-                let close_requested = raw_input
-                    .viewports
-                    .get(&raw_input.viewport_id)
-                    .is_some_and(|viewport| viewport.close_requested());
-                if close_requested || close_pending {
-                    self.script_note_workspace
-                        .transition_attempted_viewports
-                        .remove(&raw_input.viewport_id);
-                } else if self
-                    .script_note_workspace
-                    .transition_attempted_viewports
-                    .insert(raw_input.viewport_id)
-                {
-                    // The result is intentionally best-effort. Record the
-                    // attempt before the call so unavailable handles never
-                    // cause a per-frame retry loop.
-                    let _ = transition_control::disable_transitions(viewport_kind);
-                    if viewport_kind == ScriptNoteViewportKind::TypeDialog {
-                        let _ = transition_control::hide_type_dialog_caption_buttons();
-                    }
-                }
-            }
-        }
         if status_modifiers_changed(self.last_status_modifiers, raw_input.modifiers) {
             self.last_status_modifiers = raw_input.modifiers;
             // Modifier-only transitions may not produce a semantic editor
@@ -469,8 +403,7 @@ impl eframe::App for ScriptCraftApp {
             self.effective_pixels_per_point = Some(effective_pixels_per_point);
         }
 
-        // eframe invokes this hook for each viewport. Keep the middle-button
-        // gesture state viewport-local while routing both windows through the
+        // Keep the middle-button gesture state viewport-local while routing both windows through the
         // same pinch command and anchor/repaint implementation.
         let viewport_close_requested = raw_input
             .viewports
@@ -876,6 +809,7 @@ impl ScriptCraftApp {
             });
             show_fdx_migration_dialog(self, &ctx);
         } else {
+            self.consume_pending_element_focus_return(&ctx);
             measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Chrome, |app| {
                 show_application_panels(app, ui)
             });

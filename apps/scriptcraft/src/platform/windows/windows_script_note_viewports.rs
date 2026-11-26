@@ -146,3 +146,28 @@ pub(crate) fn hide_type_dialog_caption_buttons() -> TransitionControlOutcome {
         TransitionControlOutcome::Unavailable
     }
 }
+
+/// Applies the per-window native treatment before queuing the first reveal.
+/// Native failures remain best-effort and do not prevent the positioned window
+/// from becoming visible.
+pub(crate) fn prepare_and_reveal(
+    ctx: &eframe::egui::Context,
+    viewport_id: eframe::egui::ViewportId,
+    viewport: ScriptNoteViewportKind,
+) -> TransitionControlOutcome {
+    let transitions = disable_transitions(viewport);
+    let caption = if viewport == ScriptNoteViewportKind::TypeDialog {
+        hide_type_dialog_caption_buttons()
+    } else {
+        TransitionControlOutcome::Applied
+    };
+    ctx.send_viewport_cmd_to(viewport_id, eframe::egui::ViewportCommand::Visible(true));
+
+    if transitions == TransitionControlOutcome::Applied
+        && caption == TransitionControlOutcome::Applied
+    {
+        TransitionControlOutcome::Applied
+    } else {
+        TransitionControlOutcome::Unavailable
+    }
+}

@@ -84,10 +84,14 @@ pub(crate) fn show(
             close(root_ctx);
             app.script_note_workspace.type_dialog_close_pending = false;
         }
+        #[cfg(target_os = "windows")]
+        {
+            app.script_note_workspace.forget_presentation(viewport_id());
+        }
         return None;
     }
     let position = position(&app.script_note_workspace);
-    let builder = egui::ViewportBuilder::default()
+    let mut builder = egui::ViewportBuilder::default()
         .with_title("New ScriptNote Type")
         .with_inner_size(DIALOG_SIZE)
         .with_min_inner_size(DIALOG_SIZE)
@@ -98,11 +102,23 @@ pub(crate) fn show(
         .with_titlebar_shown(true)
         .with_titlebar_buttons_shown(false);
     let builder = position.map_or(builder.clone(), |position| builder.with_position(position));
+    let mut builder = builder;
+    #[cfg(target_os = "windows")]
+    let needs_hidden_first_presentation = app
+        .script_note_workspace
+        .needs_hidden_first_presentation(viewport_id());
+    #[cfg(not(target_os = "windows"))]
+    let needs_hidden_first_presentation = false;
+    if needs_hidden_first_presentation {
+        builder = builder.with_visible(false);
+    }
     let mut action = None;
     let mut focused = false;
     let mut request_input_focus = false;
+    let mut unsupported = false;
     root_ctx.show_viewport_immediate(viewport_id(), builder, |viewport_ui, class| {
         if class != egui::ViewportClass::Immediate {
+            unsupported = true;
             return;
         }
         let ctx = viewport_ui.ctx().clone();
@@ -245,5 +261,23 @@ pub(crate) fn show(
         });
     });
     app.script_note_workspace.type_dialog_focused = focused;
+    if unsupported {
+        return action;
+    }
+    #[cfg(target_os = "windows")]
+    if app.script_note_workspace.new_type_dialog_open {
+        let id = viewport_id();
+        if needs_hidden_first_presentation {
+            app.script_note_workspace.mark_hidden(id);
+        }
+        if action.is_none() && app.script_note_workspace.needs_reveal(id) {
+            let _ = crate::platform::windows::windows_script_note_viewports::prepare_and_reveal(
+                root_ctx,
+                id,
+                crate::platform::windows::windows_script_note_viewports::ScriptNoteViewportKind::TypeDialog,
+            );
+            app.script_note_workspace.mark_revealed(id);
+        }
+    }
     action
 }

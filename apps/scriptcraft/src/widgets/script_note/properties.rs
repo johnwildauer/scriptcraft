@@ -109,6 +109,10 @@ pub(crate) fn flush_pending_closes(
 ) {
     if state.color_menu_close_pending {
         close_color_viewport(ctx);
+        #[cfg(target_os = "windows")]
+        {
+            state.forget_presentation(color_viewport_id());
+        }
         state.color_menu_close_pending = false;
         state.color_menu_focused = false;
         state.color_menu_focus_pending = false;
@@ -116,6 +120,10 @@ pub(crate) fn flush_pending_closes(
     }
     if state.type_menu_close_pending {
         close_type_viewport(ctx);
+        #[cfg(target_os = "windows")]
+        {
+            state.forget_presentation(type_viewport_id());
+        }
         state.type_menu_close_pending = false;
         state.type_menu_focused = false;
         state.type_menu_focus_pending = false;
@@ -223,7 +231,7 @@ fn menu_viewport_geometry(
         position.x = position.x.clamp(bounds.left(), (bounds.right() - width).max(bounds.left()));
     }
     let size = Vec2::new(width, height);
-    let builder = egui::ViewportBuilder::default()
+    let mut builder = egui::ViewportBuilder::default()
         .with_title(if id == color_viewport_id() { "ScriptNote Color" } else { "ScriptNote Type" })
         .with_position(position)
         .with_inner_size(size)
@@ -233,6 +241,10 @@ fn menu_viewport_geometry(
         .with_decorations(false)
         .with_transparent(true)
         .with_has_shadow(false);
+    #[cfg(target_os = "windows")]
+    if state.needs_hidden_first_presentation(id) {
+        builder = builder.with_visible(false);
+    }
     (builder, size)
 }
 
@@ -369,6 +381,21 @@ fn show_color_viewport(
             popup_size,
             &mut state.color_menu_measured_size,
         );
+        #[cfg(target_os = "windows")]
+        {
+            let id = color_viewport_id();
+            if state.needs_hidden_first_presentation(id) {
+                state.mark_hidden(id);
+            }
+            if state.needs_reveal(id) {
+                let _ = crate::platform::windows::windows_script_note_viewports::prepare_and_reveal(
+                    root_ctx,
+                    id,
+                    crate::platform::windows::windows_script_note_viewports::ScriptNoteViewportKind::ColorMenu,
+                );
+                state.mark_revealed(id);
+            }
+        }
     }
     if let Some(selected) = selected { *action = Some(selected); }
 }
@@ -491,6 +518,21 @@ fn show_type_viewport(
             popup_size,
             &mut state.type_menu_measured_size,
         );
+        #[cfg(target_os = "windows")]
+        {
+            let id = type_viewport_id();
+            if state.needs_hidden_first_presentation(id) {
+                state.mark_hidden(id);
+            }
+            if state.needs_reveal(id) {
+                let _ = crate::platform::windows::windows_script_note_viewports::prepare_and_reveal(
+                    root_ctx,
+                    id,
+                    crate::platform::windows::windows_script_note_viewports::ScriptNoteViewportKind::TypeMenu,
+                );
+                state.mark_revealed(id);
+            }
+        }
     }
     if let Some(choice) = selected { *action = Some(PropertyMenuAction::Type(choice)); }
 }

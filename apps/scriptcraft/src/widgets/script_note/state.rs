@@ -1,5 +1,13 @@
 use scriptcraft_model::{formatted_text::InlineColor, StableId};
-use std::collections::HashSet;
+#[cfg(target_os = "windows")]
+use std::collections::HashMap;
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativePresentationState {
+    Hidden,
+    Revealed,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct MarkerAnchor {
@@ -88,7 +96,8 @@ pub(crate) struct ScriptNoteWorkspaceState {
     pub(crate) focus_viewport_on_next_present: bool,
     pub(crate) viewport_focused: bool,
     pub(crate) reveal_pending: bool,
-    pub(crate) transition_attempted_viewports: HashSet<eframe::egui::ViewportId>,
+    #[cfg(target_os = "windows")]
+    pub(crate) native_presentations: HashMap<eframe::egui::ViewportId, NativePresentationState>,
 }
 
 impl Default for ScriptNoteWorkspaceState {
@@ -139,25 +148,38 @@ impl Default for ScriptNoteWorkspaceState {
             focus_viewport_on_next_present: false,
             viewport_focused: false,
             reveal_pending: false,
-            transition_attempted_viewports: HashSet::new(),
+            #[cfg(target_os = "windows")]
+            native_presentations: HashMap::new(),
         }
     }
 }
 
 impl ScriptNoteWorkspaceState {
-    pub(crate) fn reset_pending_transition_attempts(&mut self) {
-        if self.viewport_close_pending && self.open_note.is_none() {
-            self.transition_attempted_viewports
-                .remove(&super::viewport::viewport_id());
-        }
-        if self.color_menu_close_pending {
-            self.transition_attempted_viewports
-                .remove(&super::properties::color_viewport_id());
-        }
-        if self.type_menu_close_pending {
-            self.transition_attempted_viewports
-                .remove(&super::properties::type_viewport_id());
-        }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn needs_hidden_first_presentation(&self, id: eframe::egui::ViewportId) -> bool {
+        !self.native_presentations.contains_key(&id)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn needs_reveal(&self, id: eframe::egui::ViewportId) -> bool {
+        self.native_presentations.get(&id) == Some(&NativePresentationState::Hidden)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn mark_hidden(&mut self, id: eframe::egui::ViewportId) {
+        self.native_presentations
+            .insert(id, NativePresentationState::Hidden);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn mark_revealed(&mut self, id: eframe::egui::ViewportId) {
+        self.native_presentations
+            .insert(id, NativePresentationState::Revealed);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn forget_presentation(&mut self, id: eframe::egui::ViewportId) {
+        self.native_presentations.remove(&id);
     }
 
     pub(crate) fn present(&mut self, note: StableId, focus_body: bool) {
@@ -199,7 +221,10 @@ impl ScriptNoteWorkspaceState {
 
     pub(crate) fn dismiss(&mut self) -> bool {
         let was_open = self.open_note.take().is_some();
-        self.transition_attempted_viewports.clear();
+        #[cfg(target_os = "windows")]
+        {
+            self.native_presentations.clear();
+        }
         self.reveal_pending = false;
         self.type_dialog_close_pending |= self.new_type_dialog_open;
         self.type_menu_close_pending |= self.type_menu_open;

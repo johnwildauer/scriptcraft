@@ -7,7 +7,7 @@ use crate::{
     commands::CommandInvocation,
     views::script::{navigate, navigation_enabled, NoteNavigationDirection},
 };
-use eframe::egui::{self, pos2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use eframe::egui::{self, pos2, Pos2, Rect, Sense, Vec2};
 use scriptcraft_commands::{
     Command, CommandOrigin, ScriptNoteColorValue, ScriptNoteIdValue, ScriptNotePropertiesValue,
     ScriptNoteSelectionValue, ScriptNoteTextPositionValue, ScriptNoteTimestampValue,
@@ -16,6 +16,8 @@ use scriptcraft_layout::{LayoutEnvironment, ScriptNoteMetrics};
 use scriptcraft_session::editing::{ScriptNoteField, ScriptNoteSelection, ScriptNoteTextPosition};
 
 const VIEWPORT_NAME: &str = "scriptcraft-script-note";
+const COLOR_CONTROL_ID: &str = "script-note-color-control";
+const TYPE_CONTROL_ID: &str = "script-note-type-control";
 
 pub(crate) fn viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of(VIEWPORT_NAME)
@@ -203,7 +205,18 @@ pub(crate) fn show(app: &mut ScriptCraftApp, root_ctx: &egui::Context) {
     let mut timestamp_error = false;
     let mut navigation = None;
 
-    root_ctx.show_viewport_immediate(view_id, viewport_builder(position), |viewport_ui, class| {
+    let mut builder = viewport_builder(position);
+    #[cfg(target_os = "windows")]
+    let needs_hidden_first_presentation = app
+        .script_note_workspace
+        .needs_hidden_first_presentation(view_id);
+    #[cfg(not(target_os = "windows"))]
+    let needs_hidden_first_presentation = false;
+    if needs_hidden_first_presentation {
+        builder = builder.with_visible(false);
+    }
+
+    root_ctx.show_viewport_immediate(view_id, builder, |viewport_ui, class| {
         if class != egui::ViewportClass::Immediate {
             unsupported = true;
             return;
@@ -229,11 +242,33 @@ pub(crate) fn show(app: &mut ScriptCraftApp, root_ctx: &egui::Context) {
             child_palette.script_workspace.page.text,
         );
         let color_rect = regions.color_region;
-        let color_name = egui::RichText::new(format!("Color: {}", color_presentation.accessible_name)).color(Color32::TRANSPARENT);
-        let color_response = root.put(color_rect, egui::Button::new(color_name).fill(Color32::TRANSPARENT).stroke(Stroke::NONE));
+        let color_name = format!("Color: {}", color_presentation.accessible_name);
+        let color_response = root
+            .interact(
+                color_rect,
+                root.id().with(COLOR_CONTROL_ID),
+                if dialog_topmost { Sense::hover() } else { Sense::click() },
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        color_response.widget_info(|| egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            !dialog_topmost,
+            color_name.clone(),
+        ));
         let type_name = note.note_type.as_deref().unwrap_or("None");
-        let type_accessible_name = egui::RichText::new(format!("Type: {type_name}")).color(Color32::TRANSPARENT);
-        let type_response = root.put(regions.type_region, egui::Button::new(type_accessible_name).fill(Color32::TRANSPARENT).stroke(Stroke::NONE));
+        let type_accessible_name = format!("Type: {type_name}");
+        let type_response = root
+            .interact(
+                regions.type_region,
+                root.id().with(TYPE_CONTROL_ID),
+                if dialog_topmost { Sense::hover() } else { Sense::click() },
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        type_response.widget_info(|| egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            !dialog_topmost,
+            type_accessible_name.clone(),
+        ));
         if !dialog_topmost && color_response.clicked() {
             if app.script_note_workspace.color_menu_open {
                 app.script_note_workspace.color_menu_open = false;
@@ -413,6 +448,20 @@ pub(crate) fn show(app: &mut ScriptCraftApp, root_ctx: &egui::Context) {
         }
         app.script_note_workspace.unsupported_viewport = true;
         dismiss = true;
+    }
+    #[cfg(target_os = "windows")]
+    if !unsupported && !dismiss && app.script_note_workspace.open_note.is_some() {
+        if needs_hidden_first_presentation {
+            app.script_note_workspace.mark_hidden(view_id);
+        }
+        if app.script_note_workspace.needs_reveal(view_id) {
+            let _ = crate::platform::windows::windows_script_note_viewports::prepare_and_reveal(
+                root_ctx,
+                view_id,
+                crate::platform::windows::windows_script_note_viewports::ScriptNoteViewportKind::Card,
+            );
+            app.script_note_workspace.mark_revealed(view_id);
+        }
     }
     if timestamp_error {
         app.show_error("ScriptNote timestamp could not be represented; note unchanged");

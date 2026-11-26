@@ -38,7 +38,7 @@ impl ScriptCraftApp {
                 self.appearance_applications
                     .clear(crate::chrome::theme::AppearanceContext::TemplateSelector);
                 self.command_projection_cache = None;
-                self.restore_focus_after_element_windows(return_surface, ctx);
+                self.schedule_focus_return_after_element_windows(return_surface);
                 ctx.request_repaint();
                 DesktopCommandOutcome::EffectDispatched
             }
@@ -212,11 +212,54 @@ impl ScriptCraftApp {
         if inspector_remains_open || self.element_windows.selector_open() {
             crate::widgets::elements::focus_topmost_element_viewport(self, ctx);
         } else {
-            self.restore_focus_after_element_windows(return_surface, ctx);
+            self.schedule_focus_return_after_element_windows(return_surface);
         }
     }
 
-    fn restore_focus_after_element_windows(
+    fn schedule_focus_return_after_element_windows(
+        &mut self,
+        requested_surface: Option<EditorSurface>,
+    ) {
+        self.element_windows
+            .schedule_root_focus_return(requested_surface);
+    }
+
+    /// Applies a queued final return only when the current root pass is allowed
+    /// to restore editor focus. Keeping the request queued preserves temporary
+    /// replacement/modal/native-output locks.
+    pub(crate) fn consume_pending_element_focus_return(
+        &mut self,
+        ctx: &eframe::egui::Context,
+    ) {
+        if self
+            .element_windows
+            .pending_root_focus_return()
+            .is_none()
+        {
+            return;
+        }
+        if self.element_windows.owns_input() || self.replacement_open_pending() {
+            return;
+        }
+        let availability = self.app_command_availability();
+        if !crate::documents::replacement::replacement_resume_focus_allowed(
+            availability.modal_blocked,
+            availability.native_output_active,
+        ) {
+            return;
+        }
+
+        let Some(requested_surface) = self
+            .element_windows
+            .take_pending_root_focus_return()
+        else {
+            return;
+        };
+
+        self.apply_focus_return_after_element_windows(Some(requested_surface), ctx);
+    }
+
+    fn apply_focus_return_after_element_windows(
         &mut self,
         requested_surface: Option<EditorSurface>,
         ctx: &eframe::egui::Context,
@@ -278,7 +321,7 @@ impl ScriptCraftApp {
             self.appearance_applications
                 .clear(crate::chrome::theme::AppearanceContext::TemplateSelector);
             self.command_projection_cache = None;
-            self.restore_focus_after_element_windows(return_surface, ctx);
+            self.schedule_focus_return_after_element_windows(return_surface);
             self.show_error(
                 "ELEMENTS_VIEWPORT_UNSUPPORTED: this renderer cannot create a separate native window; Elements remains closed",
             );

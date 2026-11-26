@@ -105,6 +105,7 @@ pub(crate) struct ElementWindowState {
     elements_open: bool,
     selector: Option<TemplateSelectorState>,
     focus_return_surface: Option<EditorSurface>,
+    pending_root_focus_return: Option<EditorSurface>,
     elements_focus_requested: bool,
     selected_element: Option<ElementTypeKey>,
     active_tab: ElementsTab,
@@ -160,6 +161,24 @@ impl ElementWindowState {
 
     pub(crate) const fn focus_return_surface(&self) -> Option<EditorSurface> {
         self.focus_return_surface
+    }
+
+    /// Schedules one transient root-editor focus return after the final dialog
+    /// close. A missing captured target retains the existing Body fallback.
+    pub(crate) fn schedule_root_focus_return(&mut self, surface: Option<EditorSurface>) {
+        self.pending_root_focus_return = Some(surface.unwrap_or(EditorSurface::Body));
+    }
+
+    pub(crate) const fn pending_root_focus_return(&self) -> Option<EditorSurface> {
+        self.pending_root_focus_return
+    }
+
+    pub(crate) fn take_pending_root_focus_return(&mut self) -> Option<EditorSurface> {
+        self.pending_root_focus_return.take()
+    }
+
+    fn cancel_pending_root_focus_return(&mut self) {
+        self.pending_root_focus_return = None;
     }
 
     pub(crate) fn selected_element(&self) -> Option<&ElementTypeKey> {
@@ -249,6 +268,7 @@ impl ElementWindowState {
             }
             return false;
         }
+        self.cancel_pending_root_focus_return();
         self.elements_open = true;
         self.focus_return_surface = Some(return_surface);
         self.elements_focus_requested = true;
@@ -268,6 +288,7 @@ impl ElementWindowState {
         if !self.elements_open || mode != TemplateSelectorMode::ApplyToCurrent {
             return false;
         }
+        self.cancel_pending_root_focus_return();
         self.selector = Some(TemplateSelectorState::new(
             mode,
             DEFAULT_BUILTIN_TEMPLATE_ID,
@@ -289,6 +310,7 @@ impl ElementWindowState {
             selector.focus_requested = true;
             return false;
         }
+        self.cancel_pending_root_focus_return();
         self.focus_return_surface = Some(return_surface);
         self.selector = Some(TemplateSelectorState::new(
             TemplateSelectorMode::NewDocument,

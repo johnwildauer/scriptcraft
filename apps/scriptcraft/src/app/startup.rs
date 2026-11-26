@@ -276,7 +276,7 @@ pub(crate) fn menu_platform_argument(choice: menu::MenuPlatformChoice) -> OsStri
 fn native_options(initial_title: &str) -> Result<eframe::NativeOptions, String> {
     let window_state = scriptcraft_fdx::WindowState::DEFAULT;
     let icon = runtime_icon::egui_icon()?;
-    Ok(eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title(initial_title)
             .with_icon(std::sync::Arc::new(icon))
@@ -298,7 +298,16 @@ fn native_options(initial_title: &str) -> Result<eframe::NativeOptions, String> 
         // native window builder keeps the root chrome opaque.
         window_builder: Some(Box::new(|viewport| viewport.with_transparent(false))),
         ..Default::default()
-    })
+    };
+
+    #[cfg(target_os = "windows")]
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        // Use an alpha-capable visual for off-root children; the root builder remains opaque.
+        setup.instance_descriptor.backend_options.dx12.presentation_system =
+            eframe::wgpu::Dx12SwapchainKind::DxgiFromVisual;
+    }
+
+    Ok(options)
 }
 
 struct StartupPresentation {
