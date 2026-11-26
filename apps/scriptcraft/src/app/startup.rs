@@ -289,11 +289,14 @@ fn native_options(initial_title: &str) -> Result<eframe::NativeOptions, String> 
                 window_state.top as f32,
             ))
             .with_decorations(true)
-            .with_transparent(false)
+            .with_transparent(true)
             .with_title_shown(true)
             .with_titlebar_shown(true)
             .with_fullsize_content_view(false)
             .with_titlebar_buttons_shown(true),
+        // Keep shared renderer alpha support enabled while the hooked root
+        // native window builder keeps the root chrome opaque.
+        window_builder: Some(Box::new(|viewport| viewport.with_transparent(false))),
         ..Default::default()
     })
 }
