@@ -14,6 +14,7 @@ use crate::{
     layout_inputs::DocumentPageLayout,
     preservation::PreservationState,
     script_notes::ScriptNotes,
+    story_map::StoryMap,
     title_page::TitlePageParagraph,
     validation::validate_document_page_layout,
     ElementTypeKey, ModelError,
@@ -34,6 +35,8 @@ pub struct Project {
     pub preservation: Option<PreservationState>,
     /// Semantic Beat content; presentation and viewport state are separate.
     beat_board: BeatBoard,
+    /// Durable Story Map target/lanes; card placements remain on their BeatCards.
+    story_map: StoryMap,
     /// Ordered semantic ScriptNotes; replacement is validated as one candidate.
     script_notes: ScriptNotes,
     /// Ordered document-owned element settings. The backing registry is private
@@ -56,6 +59,7 @@ impl PartialEq for Project {
             && self.dual_dialogue_paragraph_overrides == other.dual_dialogue_paragraph_overrides
             && self.preservation == other.preservation
             && self.beat_board == other.beat_board
+            && self.story_map == other.story_map
             && self.script_notes == other.script_notes
             && self.element_definitions == other.element_definitions
             && self.page_layout == other.page_layout
@@ -86,6 +90,7 @@ impl Project {
             dual_dialogue_paragraph_overrides: BTreeMap::new(),
             preservation: None,
             beat_board: BeatBoard::default(),
+            story_map: StoryMap::default(),
             script_notes: ScriptNotes::default(),
             element_definitions: DocumentElementDefinitions::default(),
             page_layout,
@@ -109,6 +114,20 @@ impl Project {
         candidate.beat_board = board;
         candidate.validate()?;
         self.beat_board = candidate.beat_board;
+        Ok(())
+    }
+
+    /// Returns the immutable Story Map aggregate without exposing unchecked live mutation.
+    pub fn story_map(&self) -> &StoryMap {
+        &self.story_map
+    }
+
+    /// Replaces the complete Story Map only after validating a detached Project candidate.
+    pub fn replace_story_map(&mut self, story_map: StoryMap) -> Result<(), ModelError> {
+        let mut candidate = self.clone();
+        candidate.story_map = story_map;
+        candidate.validate()?;
+        self.story_map = candidate.story_map;
         Ok(())
     }
 

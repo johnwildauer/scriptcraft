@@ -37,6 +37,7 @@ pub fn save_session<F: FdxStorageFileSystem>(
         fdx::InvisiblesState::default(),
         fdx::ScriptPanelDisplayMode::Page,
         fdx::BeatBoardViewState::default(),
+        fdx::StoryMapViewState::default(),
     )
 }
 
@@ -63,6 +64,7 @@ pub fn save_session_with_window_state<F: FdxStorageFileSystem>(
         fdx::InvisiblesState::default(),
         fdx::ScriptPanelDisplayMode::Page,
         fdx::BeatBoardViewState::default(),
+        fdx::StoryMapViewState::default(),
     )
 }
 
@@ -78,6 +80,7 @@ pub fn save_session_with_view_state<F: FdxStorageFileSystem>(
     invisibles_state: fdx::InvisiblesState,
     display_mode: fdx::ScriptPanelDisplayMode,
     beat_board_view_state: fdx::BeatBoardViewState,
+    story_map_view_state: fdx::StoryMapViewState,
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
     save_session_with_codec_and_view_state(
         fs,
@@ -90,6 +93,7 @@ pub fn save_session_with_view_state<F: FdxStorageFileSystem>(
         invisibles_state,
         display_mode,
         beat_board_view_state,
+        story_map_view_state,
     )
 }
 
@@ -139,6 +143,7 @@ fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandid
     invisibles_state: fdx::InvisiblesState,
     display_mode: fdx::ScriptPanelDisplayMode,
     beat_board_view_state: fdx::BeatBoardViewState,
+    story_map_view_state: fdx::StoryMapViewState,
 ) -> Result<TransactionalSaveOutcome, TransactionalSaveError> {
     let operation = match &mode {
         FdxSaveMode::Save => fdx::SaveOperation::Save,
@@ -150,7 +155,8 @@ fn save_session_with_codec_and_view_state<F: FdxStorageFileSystem, C: SaveCandid
         .with_text_state(text_state)
         .with_invisibles_state(invisibles_state)
         .with_display_mode(display_mode)
-        .with_beat_board_view_state(beat_board_view_state);
+        .with_beat_board_view_state(beat_board_view_state)
+        .with_story_map_view_state(story_map_view_state);
     save_session_with_context(fs, session, target, mode, context, codec)
 }
 
@@ -187,6 +193,8 @@ fn save_session_with_context<F: FdxStorageFileSystem, C: SaveCandidateCodec>(
     let normalized = fdx::finalize_beat_board_candidate(&normalized)
         .map_err(TransactionalSaveError::Codec)?;
     let normalized = fdx::finalize_script_notes_candidate(&normalized)
+        .map_err(TransactionalSaveError::Codec)?;
+    let normalized = fdx::finalize_story_map_candidate(&normalized)
         .map_err(TransactionalSaveError::Codec)?;
     let prepared = codec.serialize(&normalized, &mut context)?;
     let rebased_project = codec
@@ -281,6 +289,7 @@ fn same_save_projection(expected: &Project, actual: &Project) -> bool {
         && same_elements(&expected.elements, &actual.elements)
         && same_dual_dialogue_projection(expected, actual)
         && fdx::same_beat_board_projection(expected, actual)
+        && fdx::same_story_map_projection(expected, actual)
         && fdx::same_script_notes_projection(expected, actual)
 }
 

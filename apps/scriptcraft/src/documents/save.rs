@@ -168,6 +168,10 @@ impl ScriptCraftApp {
             .map(FdxSaveTarget::from_baseline)
             .unwrap_or_else(FdxSaveTarget::new_unsaved);
         let before_save_project = self.session.project().clone();
+        let gesture_compatibility = self.story_map_beat_interaction.capture_save_compatibility(
+            &before_save_project,
+            &self.beat_drag_coordinator,
+        );
         let active_before_save = self.active_body_dual_dialogue_group.clone();
         let text_state = self.root_text_state();
         match fdx_storage::save_session_with_view_state(
@@ -181,6 +185,7 @@ impl ScriptCraftApp {
             self.invisibles,
             Self::fdx_display_mode_from_script_view_mode(self.script_view_mode),
             self.beat_board_view_state,
+            self.story_map_view_state,
         ) {
             Ok(outcome) => {
                 self.native_path = target.path().map(PathBuf::from);
@@ -198,6 +203,16 @@ impl ScriptCraftApp {
                     (focused_group.id == new_id).then_some(new_id)
                 });
                 self.set_active_body_group(rebased_active);
+                let primary_down = self.story_map_beat_interaction.last_primary_down();
+                self.story_map_beat_interaction.reconcile_after_successful_save(
+                    gesture_compatibility,
+                    self.session.project(),
+                    self.session.project().layout_identity().clone(),
+                    self.session.mutation_token(),
+                    primary_down,
+                    &mut self.beat_drag_coordinator,
+                    &mut self.beat_interaction,
+                );
                 // Save preflight always prepares and publishes complete derived
                 // data. The session's pending-work state, not a revision marker,
                 // keeps the timer from repeating that work.

@@ -39,6 +39,7 @@ pub enum CommandRejection {
     InvalidSelection(SelectionError),
     PositionOutOfRange(PositionError),
     InvalidScriptNoteValue,
+    InvalidStoryMapPlacement,
 }
 
 /// Executes with the legacy Body target for generic surface-less commands.
@@ -132,6 +133,26 @@ pub fn execute_editor_command_on_surface(
         if !eligible {
             return CommandOutcome::Unavailable(UnavailableReason::Selection);
         }
+    }
+
+    if let Command::StoryMapBeatPlacementSet {
+        card, lane_uuid, start_eighths, length_eighths,
+    } = command {
+        let request = crate::story_map_placement_to_core(
+            card, lane_uuid, *start_eighths, *length_eighths,
+        );
+        return match session.set_story_map_placement(request) {
+            Ok(scriptcraft_session::editing::StoryMapPlacementOutcome::Changed) => CommandOutcome::Changed,
+            Ok(scriptcraft_session::editing::StoryMapPlacementOutcome::NoOp) => CommandOutcome::NoOp,
+            Ok(scriptcraft_session::editing::StoryMapPlacementOutcome::Rejected(reason)) => match reason {
+                scriptcraft_session::editing::StoryMapPlacementRejection::MissingCard
+                | scriptcraft_session::editing::StoryMapPlacementRejection::MissingLane => {
+                    CommandOutcome::Unavailable(UnavailableReason::Selection)
+                }
+                _ => CommandOutcome::Rejected(CommandRejection::InvalidStoryMapPlacement),
+            },
+            Err(error) => CommandOutcome::Failed(error),
+        };
     }
 
     if let Command::FormatTemplateApply { template } = command {

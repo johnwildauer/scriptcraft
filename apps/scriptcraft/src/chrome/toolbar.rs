@@ -384,6 +384,7 @@ fn apply_toolbar_enablement(items: &mut [ToolbarItemSpec], availability: AppComm
             ToolbarBehavior::ShowHideDropdown => {
                 if availability.is_enabled(scriptcraft_commands::CommandId::ViewInvisiblesToggle)
                     && availability.is_enabled(scriptcraft_commands::CommandId::ViewRulerToggle)
+                    && availability.is_enabled(scriptcraft_commands::CommandId::ViewOutlineEditorToggle)
                 {
                     EnablementPolicy::Enabled
                 } else {
@@ -410,6 +411,7 @@ fn apply_toolbar_enablement(items: &mut [ToolbarItemSpec], availability: AppComm
 enum ShowHideAction {
     Invisibles,
     Ruler,
+    OutlineEditor,
 }
 
 impl ShowHideAction {
@@ -417,6 +419,7 @@ impl ShowHideAction {
         match self {
             Self::Invisibles => Command::ViewInvisiblesToggle,
             Self::Ruler => Command::ViewRulerToggle,
+            Self::OutlineEditor => Command::ViewOutlineEditorToggle,
         }
     }
 }
@@ -892,6 +895,7 @@ impl ScriptCraftApp {
         item: ToolbarItemSpec,
         width: f32,
         presentation: ToolbarPresentationMetrics,
+        show_story_map: bool,
     ) {
         let palette = self.theme_palette.toolbar;
         let group_height = toolbar_item_group_height(ui.style());
@@ -909,9 +913,10 @@ impl ScriptCraftApp {
             .on_hover_cursor(toolbar_cursor_icon());
         let invisibles_label = self.invisibles_action_label();
         let ruler_label = self.ruler_action_label();
+        let outline_editor_label = ScriptCraftApp::outline_editor_action_label(show_story_map);
         let accessible_name = format!(
-            "{}: {}; {}",
-            item.accessibility_name, invisibles_label, ruler_label
+            "{}: {}; {}; {}",
+            item.accessibility_name, invisibles_label, ruler_label, outline_editor_label
         );
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, accessible_name.clone())
@@ -974,6 +979,20 @@ impl ScriptCraftApp {
                 });
                 if ruler_row.clicked() && enabled {
                     chosen = Some(ShowHideAction::Ruler);
+                    ui.close();
+                }
+
+                let outline_editor_row =
+                    ui.add_enabled(enabled, egui::Button::new(outline_editor_label));
+                outline_editor_row.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Button,
+                        enabled,
+                        outline_editor_label,
+                    )
+                });
+                if outline_editor_row.clicked() && enabled {
+                    chosen = Some(ShowHideAction::OutlineEditor);
                     ui.close();
                 }
             });
@@ -1852,11 +1871,15 @@ impl ScriptCraftApp {
                             let enabled = item.enablement == EnablementPolicy::Enabled;
                             let invisibles_label = self.invisibles_action_label();
                             let ruler_label = self.ruler_action_label();
+                            let outline_editor_label = ScriptCraftApp::outline_editor_action_label(
+                                availability.story_map_visible,
+                            );
                             let accessible_name = format!(
-                                "{}: {}; {}",
+                                "{}: {}; {}; {}",
                                 item.accessibility_name,
                                 invisibles_label,
-                                ruler_label
+                                ruler_label,
+                                outline_editor_label
                             );
                             ui.add_enabled_ui(enabled, |ui| {
                                 let submenu = ui.menu_button(item.label, |ui| {
@@ -1890,6 +1913,23 @@ impl ScriptCraftApp {
                                     });
                                     if ruler_row.clicked() && enabled {
                                         chosen_show_hide_action = Some(ShowHideAction::Ruler);
+                                        ui.close();
+                                    }
+
+                                    let outline_editor_row = ui.add_enabled(
+                                        enabled,
+                                        egui::Button::new(outline_editor_label),
+                                    );
+                                    outline_editor_row.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::Button,
+                                            enabled,
+                                            outline_editor_label,
+                                        )
+                                    });
+                                    if outline_editor_row.clicked() && enabled {
+                                        chosen_show_hide_action =
+                                            Some(ShowHideAction::OutlineEditor);
                                         ui.close();
                                     }
                                 });
@@ -2064,7 +2104,13 @@ impl ScriptCraftApp {
                                 &element_choices,
                             ),
                             ToolbarBehavior::ShowHideDropdown => {
-                                self.show_hide_toolbar_item(ui, item, width, presentation)
+                                self.show_hide_toolbar_item(
+                                    ui,
+                                    item,
+                                    width,
+                                    presentation,
+                                    availability.story_map_visible,
+                                )
                             }
                             ToolbarBehavior::ViewsDropdown => self.views_toolbar_item(
                                 ui,

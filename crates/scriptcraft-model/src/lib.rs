@@ -24,6 +24,7 @@ pub mod preservation;
 pub mod project;
 pub mod scene_metadata;
 pub mod script_notes;
+pub mod story_map;
 pub mod title_page;
 pub mod typography;
 pub mod validation;
@@ -62,6 +63,11 @@ pub use project::Project;
 pub use script_notes::{
     ScriptNote, ScriptNoteIdentity, ScriptNoteParagraph, ScriptNoteRange, ScriptNotes,
     DEFAULT_SCRIPT_NOTE_COLOR_RAW,
+};
+pub use story_map::{
+    StoryMap, StoryMapLane, StoryMapPlacement, DEFAULT_STORY_MAP_TARGET_PAGES,
+    MAX_STORY_MAP_LANES, MAX_STORY_MAP_STRING_BYTES, MAX_STORY_MAP_TARGET_PAGES,
+    STORY_MAP_EIGHTHS_PER_PAGE,
 };
 pub use title_page::{TitlePageAlignment, TitlePageParagraph, TitlePageParagraphFormatting};
 pub use typography::{

@@ -29,6 +29,12 @@ pub use script_notes::{
 mod rich_paragraph;
 mod beat_board;
 pub use beat_board::{BeatHorizontalDirection, BeatLineEdge, BeatSelection, BeatTextEditOperation, BeatTextField, BeatTextPosition};
+mod story_map;
+pub use story_map::{
+    plan_story_map_placement, StoryMapAffectedPlacement, StoryMapPlacementChangeKind,
+    StoryMapPlacementOutcome, StoryMapPlacementPlan, StoryMapPlacementPlanError,
+    StoryMapPlacementRequest, StoryMapPlacementRejection,
+};
 mod candidate;
 mod dialogue_alts;
 pub use dialogue_alts::DialogueAltTarget;

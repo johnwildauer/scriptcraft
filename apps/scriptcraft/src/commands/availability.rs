@@ -8,6 +8,7 @@ pub(crate) struct AppCommandAvailability {
     pub(crate) native_output_active: bool,
     pub(crate) invisibles_visible: bool,
     pub(crate) ruler_visible: bool,
+    pub(crate) story_map_visible: bool,
     /// Replacement handoff lock; deliberately independent from the migration
     /// modal that alone enables File Import Resolve.
     pub(crate) replacement_pending: bool,
@@ -23,6 +24,7 @@ pub(crate) struct AppCommandAvailability {
     pub(crate) body_only: bool,
     pub(crate) editor_available: bool,
     pub(crate) beat_available: bool,
+    pub(crate) story_map_placement: bool,
     pub(crate) element_change: bool,
     pub(crate) run_formatting: bool,
     pub(crate) beat_formatting: bool,
@@ -52,6 +54,7 @@ pub(crate) struct AppCommandProjection {
     pub(crate) say_undual: bool,
     pub(crate) invisibles_visible: bool,
     pub(crate) ruler_visible: bool,
+    pub(crate) story_map_visible: bool,
 }
 
 /// Every non-session input to the shared availability/label projection. Session
@@ -70,6 +73,7 @@ struct AppCommandProjectionKey {
     title_surface_focused: bool,
     invisibles_visible: bool,
     ruler_visible: bool,
+    story_map_visible: bool,
     migration_pending: bool,
     replacement_pending: bool,
     native_output_active: bool,
@@ -153,6 +157,7 @@ impl ScriptCraftApp {
             title_surface_focused: self.title_view.surface_focused,
             invisibles_visible: self.active_surface_invisibles_visible(),
             ruler_visible: self.settings_store.ruler_visible(),
+            story_map_visible: self.settings_store.story_map_visible(),
             migration_pending: self.pending_fdx_open.is_some(),
             replacement_pending: self.replacement_open_pending(),
             native_output_active: self.native_output_active(),
@@ -188,6 +193,7 @@ impl ScriptCraftApp {
             ),
             invisibles_visible: key.invisibles_visible,
             ruler_visible: key.ruler_visible,
+            story_map_visible: key.story_map_visible,
         };
         self.command_projection_cache = Some(CachedAppCommandProjection { key, projection });
         projection
@@ -228,6 +234,12 @@ impl ScriptCraftApp {
                         .is_ok()
                         && selection.anchor.element == selection.focus.element
                 });
+        }
+        if let scriptcraft_commands::Command::StoryMapBeatPlacementSet { card, lane_uuid, .. } = command {
+            availability.story_map_placement = self.session.project().beat_board().cards.iter()
+                .any(|item| &item.id == card.as_core())
+                && self.session.project().story_map().lanes.iter()
+                    .any(|lane| lane.uuid == lane_uuid.as_str());
         }
         if let scriptcraft_commands::Command::EditorRunFormattingSet { surface, .. }
             | scriptcraft_commands::Command::EditorParagraphFormattingSet { surface, .. } = command
@@ -444,6 +456,7 @@ impl ScriptCraftApp {
             native_output_active,
             invisibles_visible: self.active_surface_invisibles_visible(),
             ruler_visible: self.settings_store.ruler_visible(),
+            story_map_visible: self.settings_store.story_map_visible(),
             replacement_pending,
             title_page_only_close: self.active_editor_surface() == EditorSurface::TitlePage
                 && self.title_page_window_open,
@@ -462,6 +475,9 @@ impl ScriptCraftApp {
             beat_available: self.root_document_view == RootDocumentView::BeatBoard
                 && self.active_editor_surface == EditorSurface::Body && !self.title_view_state_swapped
                 && !self.title_view.surface_focused && !self.element_windows.owns_input(),
+            // Placement targets are rechecked per payload in command_dispatch_availability;
+            // they do not depend on the active root, Story Map visibility, or selection.
+            story_map_placement: true,
             element_change: editor_available && element_change,
             run_formatting: editor_available && self.active_editor_surface == EditorSurface::Body && valid_body_selection,
             beat_formatting: self.root_document_view == RootDocumentView::BeatBoard
@@ -583,6 +599,7 @@ impl AppCommandAvailability {
             | CommandId::BeatBoardCardGeometrySet | CommandId::BeatBoardSelectionSet
             | CommandId::BeatBoardTextEdit | CommandId::BeatBoardNavigation => self.beat_available,
             CommandId::BeatBoardCardDelete => self.beat_card_delete,
+            CommandId::StoryMapBeatPlacementSet => self.story_map_placement,
             CommandId::BeatBoardStyleToggle | CommandId::BeatBoardStyleClear
             | CommandId::BeatBoardRunFormattingSet => self.beat_formatting,
             CommandId::ScriptNoteStyleToggle | CommandId::ScriptNoteStyleClear
@@ -636,7 +653,7 @@ impl AppCommandAvailability {
             // The global modal gates above still disable Quit during migration
             // and native-output dialogs; otherwise it is focus-independent.
             CommandId::ApplicationQuit => true,
-            CommandId::ViewRulerToggle => true,
+            CommandId::ViewRulerToggle | CommandId::ViewOutlineEditorToggle => true,
             CommandId::FilePrint => cfg!(any(target_os = "macos", target_os = "windows")),
             _ => true,
         }
@@ -651,6 +668,7 @@ impl AppCommandAvailability {
             CommandId::EditRedo => DesktopUnavailableReason::RedoHistory,
             CommandId::EditDelete => DesktopUnavailableReason::DeleteTarget,
             CommandId::BeatBoardCardDelete => DesktopUnavailableReason::Selection,
+            CommandId::StoryMapBeatPlacementSet => DesktopUnavailableReason::Selection,
             CommandId::EditSelectAll | CommandId::EditCut | CommandId::EditCopy => {
                 DesktopUnavailableReason::Selection
             }

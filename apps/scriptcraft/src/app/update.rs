@@ -57,6 +57,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
             zoom_percent: app.active_zoom(),
             appearance_mode: app.appearance_mode,
             beat_board: app.root_document_view == RootDocumentView::BeatBoard,
+            show_story_map: projection.story_map_visible,
         };
         let menu_panel = egui::Panel::top("application-menu")
             .frame(chrome_frame(app.theme_palette.toolbar))
@@ -259,8 +260,19 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                     );
                 }
             }
-        });
+    });
     status_bar::paint_panel_top_border(ui, status_panel.response.rect, app.theme_palette.status);
+    // Claim Escape before the active root editor sees it; modal owners retain
+    // priority through the shared Story Map input gate.
+    if app.story_map_preview.is_open()
+        && !app.story_map_preview_input_blocked(&ctx)
+        && ctx.input(|input| input.key_pressed(egui::Key::Escape))
+    {
+        app.story_map_preview.close();
+        ctx.input_mut(|input| {
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+        });
+    }
     let frame = if app.root_document_view == RootDocumentView::BeatBoard {
         egui::Frame::NONE.fill(app.theme_palette.script_workspace.background)
     } else {
@@ -269,6 +281,7 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
     let central = egui::CentralPanel::default()
         .frame(frame)
         .show_inside(ui, |ui| {
+            let scene_interaction = app.show_story_map(ui);
             if app.root_document_view == RootDocumentView::BeatBoard {
                 app.show_beat_board(ui);
             } else {
@@ -277,7 +290,54 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                     app.live_document_surface(ui, EditorSurface::Body)
                 });
             }
+            scene_interaction
         });
+    let mut scene_interaction = central.inner;
+    if let Some(command) = app.beat_drag_coordinator.take_command_intent() {
+        app.dispatch_command(
+            CommandInvocation::new(command, CommandOrigin::Pointer),
+            &ctx,
+        );
+    }
+    if app.story_map_preview.is_open() && !app.story_map_preview_input_blocked(&ctx) {
+        let (primary_pressed, pointer) = ctx.input(|input| {
+            (input.pointer.primary_pressed(), input.pointer.interact_pos())
+        });
+        if primary_pressed
+            && !scene_interaction.scene_clicked
+            && !scene_interaction.pointer_on_scene_press
+            && pointer.is_none_or(|point| !app.story_map_preview.contains_pointer(point))
+        {
+            app.story_map_preview.close();
+        }
+    }
+    if !app.story_map_preview_input_blocked(&ctx) {
+        let preview = {
+            let project = app.session.project();
+            let snapshot = app.story_map_projection.snapshot();
+            app.story_map_preview
+                .scene_for_snapshot(project, snapshot)
+                .map(|(scene, identity, anchor)| (scene.clone(), identity, anchor))
+        };
+        if let Some((scene, identity, anchor)) = preview {
+            app.story_map_preview.show(
+                &ctx,
+                central.response.rect,
+                identity,
+                &scene,
+                anchor,
+                app.session.project(),
+                app.prepared_document_fonts.as_ref(),
+                app.theme_palette.story_map,
+                app.theme_palette.script_workspace.page,
+            );
+            if app.story_map_preview.take_flow_failure() {
+                app.show_error(
+                    "STORY_MAP_PREVIEW_FLOW_UNAVAILABLE: last valid same-scene preview retained or text omitted; document unchanged",
+                );
+            }
+        }
+    }
     if app.timer_popup_surface == EditorSurface::TitlePage
         && (!app.title_page_window_open || app.title_viewport_unsupported)
     {
@@ -319,6 +379,7 @@ impl eframe::App for ScriptCraftApp {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.forward_story_map_body_activity(ctx, raw_input);
         if status_modifiers_changed(self.last_status_modifiers, raw_input.modifiers) {
             self.last_status_modifiers = raw_input.modifiers;
             // Modifier-only transitions may not produce a semantic editor
@@ -674,6 +735,81 @@ impl ScriptCraftApp {
         true
     }
 
+    fn forward_story_map_body_activity(
+        &mut self,
+        ctx: &egui::Context,
+        raw_input: &egui::RawInput,
+    ) {
+        if raw_input.viewport_id != egui::ViewportId::ROOT
+            || self.root_document_view != RootDocumentView::Script
+        {
+            self.story_map_projection.clear_body_pointer_capture();
+            return;
+        }
+
+        let body_focused = self.active_editor_surface == EditorSurface::Body
+            && self
+                .editor_surface_id
+                .is_some_and(|id| ctx.memory(|memory| memory.has_focus(id)));
+        if body_focused
+            && raw_input.events.iter().any(|event| match event {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
+                    !modifiers.command
+                        && !modifiers.ctrl
+                        && !modifiers.alt
+                        && matches!(
+                            key,
+                            egui::Key::ArrowDown
+                                | egui::Key::ArrowLeft
+                                | egui::Key::ArrowRight
+                                | egui::Key::ArrowUp
+                                | egui::Key::Backspace
+                                | egui::Key::Delete
+                                | egui::Key::End
+                                | egui::Key::Enter
+                                | egui::Key::Home
+                                | egui::Key::Tab
+                        )
+                }
+                egui::Event::Text(text) | egui::Event::Paste(text) => !text.is_empty(),
+                egui::Event::Ime(
+                    egui::ImeEvent::Preedit(_) | egui::ImeEvent::Commit(_),
+                ) => true,
+                _ => false,
+            })
+        {
+            self.story_map_projection.note_body_activity();
+        }
+
+        let body_rect = self.editor_surface_rect;
+        for event in &raw_input.events {
+            match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    ..
+                } => {
+                    let inside_body = body_rect.is_some_and(|rect| rect.contains(*pos));
+                    self.story_map_projection
+                        .note_body_pointer_button(*pressed, inside_body);
+                }
+                egui::Event::PointerMoved(_) => {
+                    self.story_map_projection.note_body_pointer_move();
+                }
+                egui::Event::PointerGone | egui::Event::WindowFocused(false) => {
+                    self.story_map_projection.clear_body_pointer_capture();
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn update(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let ctx = ui.ctx().clone();
         let native_pixels_per_point = ctx.input(|input| input.viewport().native_pixels_per_point);
@@ -1001,6 +1137,7 @@ impl ScriptCraftApp {
                     zoom_percent: app.active_zoom(),
                     appearance_mode: app.appearance_mode,
                     beat_board: app.root_document_view == RootDocumentView::BeatBoard,
+                    show_story_map: projection.story_map_visible,
                 };
                 if let Some(native_menu) = &mut app.native_menu {
                     native_menu.synchronize(

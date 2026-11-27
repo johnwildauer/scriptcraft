@@ -11,6 +11,7 @@ use super::{
     BeatCardIdValue, BeatPointValue, BeatRectValue, BeatSelectionValue,
     BeatTextEditValue, BeatNavigationValue,
     ScriptNoteTimestampValue,
+    StoryMapLaneIdValue, StoryMapStartEighthsValue, StoryMapLengthEighthsValue,
 };
 
 /// Stable identifier for a command. Identifiers are intentionally independent
@@ -106,11 +107,13 @@ pub enum CommandId {
     EditorDialogueAltAdd,
     EditorDialogueAltDelete,
     EditorDialogueAltNavigate,
+    ViewOutlineEditorToggle,
+    StoryMapBeatPlacementSet,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 89] = [
+    pub const ALL: [Self; 91] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -200,6 +203,8 @@ impl CommandId {
         Self::EditorDialogueAltAdd,
         Self::EditorDialogueAltDelete,
         Self::EditorDialogueAltNavigate,
+        Self::ViewOutlineEditorToggle,
+        Self::StoryMapBeatPlacementSet,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -293,6 +298,8 @@ impl CommandId {
             Self::EditorDialogueAltAdd => "editor.dialogue-alt.add",
             Self::EditorDialogueAltDelete => "editor.dialogue-alt.delete",
             Self::EditorDialogueAltNavigate => "editor.dialogue-alt.navigate",
+            Self::ViewOutlineEditorToggle => "view.outline-editor.toggle",
+            Self::StoryMapBeatPlacementSet => "story-map.beat.placement.set",
         }
     }
 }
@@ -578,6 +585,15 @@ pub enum Command {
     EditorDialogueAltDelete,
     #[serde(rename = "editor.dialogue-alt.navigate")]
     EditorDialogueAltNavigate { direction: HorizontalDirection },
+    #[serde(rename = "view.outline-editor.toggle")]
+    ViewOutlineEditorToggle,
+    #[serde(rename = "story-map.beat.placement.set")]
+    StoryMapBeatPlacementSet {
+        card: BeatCardIdValue,
+        lane_uuid: StoryMapLaneIdValue,
+        start_eighths: StoryMapStartEighthsValue,
+        length_eighths: StoryMapLengthEighthsValue,
+    },
 }
 
 impl Command {
@@ -700,6 +716,8 @@ impl Command {
             Self::EditorDialogueAltAdd => CommandId::EditorDialogueAltAdd,
             Self::EditorDialogueAltDelete => CommandId::EditorDialogueAltDelete,
             Self::EditorDialogueAltNavigate { .. } => CommandId::EditorDialogueAltNavigate,
+            Self::ViewOutlineEditorToggle => CommandId::ViewOutlineEditorToggle,
+            Self::StoryMapBeatPlacementSet { .. } => CommandId::StoryMapBeatPlacementSet,
         }
     }
 }

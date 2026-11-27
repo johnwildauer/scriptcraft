@@ -173,6 +173,15 @@ impl ScriptCraftApp {
         }
     }
 
+    pub(crate) fn outline_editor_action_label(show_story_map: bool) -> &'static str {
+        if show_story_map {
+            "Hide Outline Editor"
+        } else {
+            "Show Outline Editor"
+        }
+    }
+
+
     pub(crate) fn invisibles_color(&self) -> egui::Color32 {
         let color = self.invisibles.color;
         egui::Color32::from_rgb(color.red, color.green, color.blue)

@@ -43,6 +43,13 @@ impl ScriptCraftApp {
                 }
                 DesktopCommandOutcome::EffectDispatched
             }
+            Command::ViewOutlineEditorToggle => {
+                let visible = !self.settings_store.story_map_visible();
+                if self.settings_store.set_story_map_visible(visible) {
+                    ctx.request_repaint();
+                }
+                DesktopCommandOutcome::EffectDispatched
+            }
             Command::WindowTitlePageOpen => {
                 self.open_title_page_window(ctx);
                 DesktopCommandOutcome::EffectDispatched

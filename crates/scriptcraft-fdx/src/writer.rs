@@ -15,7 +15,8 @@ use crate::verification::{
     first_identity_set_difference, first_source_tree_difference, identity_set, intended_output_graph,
     normalize_sections, same_generated_source_tree, same_non_paragraph_identities,
     same_unrelated_board_graph, validate_project_output_budgets, verify_managed_beat_graph,
-    verify_writer_semantic_projection, IdentitySetDifference, SourceTreeDifference,
+    verify_story_map_board_graph, verify_writer_semantic_projection, IdentitySetDifference,
+    SourceTreeDifference,
 };
 use crate::version::prepare_preserved_root_output;
 use crate::whitespace::{
@@ -365,6 +366,7 @@ fn write_v6_inner(
     let normalized_project = crate::beat_board_candidate::finalize_beat_board_candidate(&normalized_project)?;
     let (normalized_project, note_identity_changes) =
         crate::script_notes_candidate::finalize_script_notes_candidate_with_changes(&normalized_project)?;
+    let normalized_project = crate::story_map_candidate::finalize_story_map_candidate(&normalized_project)?;
     let project = &normalized_project;
 
     // Project validation requires every retained definition anchor to resolve
@@ -398,7 +400,7 @@ fn write_v6_inner(
     {
         return Err(FdxError::InvalidValue);
     }
-    validate_project_output_budgets(project)?;
+    validate_project_output_budgets(project, context)?;
 
     let (nodes, expected_preserved_sections) = if let Some(state) = &project.preservation {
         *stage = WriterStage::PreservationValidation;
@@ -420,7 +422,8 @@ fn write_v6_inner(
             || state.references != original_state.references
             || !same_unrelated_board_graph(
                 &original_state.board_graph, &state.board_graph,
-                original.project.beat_board(), project.beat_board(), &BTreeSet::new(),
+                original.project.beat_board(), project.beat_board(),
+                original.project.story_map(), project.story_map(), &BTreeSet::new(),
             )
         {
             return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
@@ -461,9 +464,12 @@ fn write_v6_inner(
             project,
             &original.project,
         )?;
-        let beat_projection = crate::beat_board_output::project_beat_source(
+        let mut beat_projection = crate::beat_board_output::project_beat_source(
             &sections, project, context, state, original.project.beat_board(), original_state,
             normalize_duplicates,
+        )?;
+        crate::story_map_output::project_source_backed(
+            &mut beat_projection.sections, project, context, &original.project,
         )?;
         let mut sections = crate::script_notes_output::project_script_notes_source(
             &beat_projection.sections,
@@ -492,7 +498,8 @@ fn write_v6_inner(
             .flat_map(|section| section.children)
             .collect::<Vec<_>>();
         (nodes, Some((expected_sections, effective_identities, removed_boards,
-            original_state.board_graph.clone(), original.project.beat_board().clone(), state.references.clone())))
+            original_state.board_graph.clone(), original.project.beat_board().clone(),
+            original.project.story_map().clone(), state.references.clone())))
     } else {
         *stage = WriterStage::NewDocumentGeneration;
         let mut nodes = crate::new_document::make_new_document_nodes(project, context)?;
@@ -505,7 +512,8 @@ fn write_v6_inner(
     *stage = WriterStage::IdentityComparison;
     let (intended_identities, intended_graph) = intended_output_graph(&nodes, normalize_duplicates, project)?;
     verify_managed_beat_graph(project.beat_board(), &intended_identities, &intended_graph)?;
-    if let Some((_, expected_identities, removed_boards, original_graph, original_board, _)) =
+    verify_story_map_board_graph(project.story_map(), &intended_graph)?;
+    if let Some((_, expected_identities, removed_boards, original_graph, original_board, original_story_map, _)) =
         &expected_preserved_sections
     {
         let expected = identity_set(expected_identities);
@@ -515,7 +523,7 @@ fn write_v6_inner(
             return Err(SaveDiagnosticCode::WriteIdentitySetMismatch.error());
         }
         if !same_unrelated_board_graph(original_graph, &intended_graph, original_board,
-            project.beat_board(), removed_boards)
+            project.beat_board(), original_story_map, project.story_map(), removed_boards)
         {
             return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
         }
@@ -560,7 +568,8 @@ fn write_v6_inner(
         return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
     }
     verify_managed_beat_graph(project.beat_board(), &actual_state.identities, &actual_state.board_graph)?;
-    if let Some((expected_sections, expected_identities, removed_boards, _, _, expected_references)) = expected_preserved_sections {
+    verify_story_map_board_graph(project.story_map(), &actual_state.board_graph)?;
+    if let Some((expected_sections, expected_identities, removed_boards, _, _, _, expected_references)) = expected_preserved_sections {
         if actual_state.references != expected_references {
             return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
         }

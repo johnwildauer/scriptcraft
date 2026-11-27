@@ -1,6 +1,6 @@
 //! Project-owned Beat content and exact board geometry, independent of view state.
 
-use crate::{formatting::SourceParagraphOverrides, StableId, TextRun};
+use crate::{formatting::SourceParagraphOverrides, StableId, StoryMapPlacement, TextRun};
 
 /// Signed logical pixels in thousandths, with no floating-point semantic state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -125,6 +125,8 @@ pub struct BeatCard {
     pub title: String,
     pub paragraphs: Vec<BeatParagraph>,
     pub rect: BeatRect,
+    /// Optional Story Map PageGoal placement for this same ListItem/card.
+    pub story_map_placement: Option<StoryMapPlacement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

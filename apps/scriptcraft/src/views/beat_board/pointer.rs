@@ -7,13 +7,15 @@ use scriptcraft_fdx::BeatBoardViewState;
 use scriptcraft_commands::{BeatCardIdValue, BeatPointValue, BeatRectValue, BeatSelectionValue, Command};
 use scriptcraft_model::{BeatBoard, BeatRect, BoardFixed, StableId};
 use scriptcraft_session::editing::BeatSelection;
+use std::sync::Arc;
+use crate::views::beat_drag::{BeatDragCoordinator, BeatDragSource};
 
 #[derive(Clone, Copy)]
 struct Edges { x: i8, y: i8 }
 #[derive(Clone, Copy)]
 enum Mode { Move, Resize(Edges), Text }
 #[derive(Clone)]
-struct Press { card: StableId, start_screen: Pos2, start: (f64, f64), last: (f64, f64), rect: [f64; 4], mode: Mode, token: u64, dragging: bool }
+struct Press { card: StableId, start_screen: Pos2, start: (f64, f64), last: (f64, f64), rect: [f64; 4], mode: Mode, token: u64, dragging: bool, generation: Option<u64> }
 #[derive(Default)]
 pub(crate) struct BeatInteraction { press: Option<Press>, scrollbars: ScrollbarInteraction }
 
@@ -91,10 +93,35 @@ fn cursor(mode: Mode) -> egui::CursorIcon {
 
 impl BeatInteraction {
     pub(crate) fn cancel(&mut self) { self.press = None; self.scrollbars = ScrollbarInteraction::default(); }
+    pub(crate) fn matches_external_generation(&self, generation: u64, token: u64) -> bool {
+        self.press.as_ref().is_some_and(|press| {
+            press.generation == Some(generation) && press.dragging && press.token == token
+        })
+    }
+    pub(crate) fn rebase_external_generation(
+        &mut self,
+        generation: u64,
+        old_token: u64,
+        new_token: u64,
+    ) -> bool {
+        let Some(press) = self.press.as_mut().filter(|press| {
+            press.generation == Some(generation)
+                && press.dragging
+                && press.token == old_token
+        }) else {
+            return false;
+        };
+        press.token = new_token;
+        true
+    }
     pub(crate) fn observe_view(&mut self, ctx: &egui::Context, view: BeatBoardViewState) { self.scrollbars.observe_view(ctx, view); }
-    pub(super) fn handle_scrollbars(&mut self, ui: &egui::Ui, geometry: ViewportGeometry, view: &mut BeatBoardViewState, token: u64, enabled: bool) -> bool {
+    pub(super) fn handle_scrollbars(&mut self, ui: &egui::Ui, geometry: ViewportGeometry, view: &mut BeatBoardViewState, token: u64, enabled: bool, coordinator: &mut BeatDragCoordinator) -> bool {
         let consumed = scrollbars::handle(ui, geometry, view, &mut self.scrollbars, token, enabled);
-        if consumed { self.press = None; }
+        if consumed {
+            if let Some(press) = self.press.take() {
+                if let Some(generation) = press.generation { coordinator.cancel_generation(generation, BeatDragSource::BeatBoard); }
+            }
+        }
         consumed
     }
     pub(super) fn paint_scrollbars(&self, ui: &egui::Ui, geometry: ViewportGeometry, palette: EditorScrollbarPalette) {
@@ -106,27 +133,44 @@ impl BeatInteraction {
         Some((press.card.clone(), model_rect(preview(press, point, board))))
     }
     pub(super) fn input(&mut self, ui: &egui::Ui, response: &egui::Response, geometry: ViewportGeometry,
-        board: &BeatBoard, selection: &BeatSelection, token: u64, enabled: bool) -> Option<Command> {
+        board: &BeatBoard, selection: &BeatSelection, token: u64, document_identity: Arc<()>, enabled: bool,
+        coordinator: &mut BeatDragCoordinator) -> Option<Command> {
         let ctx = ui.ctx();
         let (pos, pressed, released, down, escape, focused, gone) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_pressed(), i.pointer.primary_released(), i.pointer.primary_down(), i.key_pressed(egui::Key::Escape), i.viewport().focused != Some(false), i.events.iter().any(|e| matches!(e, egui::Event::PointerGone))));
-        if !enabled || escape || !focused || gone || self.press.as_ref().is_some_and(|p| p.token != token) { self.cancel(); return None; }
+        if let Some((generation, _)) = coordinator.source_terminal_for_board() {
+            self.press = None;
+            coordinator.acknowledge_source(generation, BeatDragSource::BeatBoard);
+            return None;
+        }
+        if coordinator.external_engaged() { self.press = None; return None; }
+        if !enabled || escape || !focused || gone || self.press.as_ref().is_some_and(|p| p.token != token) {
+            self.cancel_capture(down, coordinator);
+            return None;
+        }
         if let Some(press) = self.press.as_mut() {
             if let Some(pos) = pos {
                 press.last = geometry.screen_to_board(pos);
                 if (down || released) && !matches!(press.mode, Mode::Text) && pos.distance(press.start_screen) >= 3.0 { press.dragging = true; }
-                if press.dragging { ctx.set_cursor_icon(if matches!(press.mode, Mode::Move) { egui::CursorIcon::Grabbing } else { cursor(press.mode) }); ctx.request_repaint(); }
+                if press.dragging {
+                    if let Some(generation) = press.generation { coordinator.publish_candidate(generation, pos); }
+                    ctx.set_cursor_icon(if matches!(press.mode, Mode::Move) { egui::CursorIcon::Grabbing } else { cursor(press.mode) });
+                    ctx.request_repaint();
+                } else if let Some(generation) = press.generation { coordinator.update_pointer(generation, pos); }
             }
             if released {
                 let press = self.press.take()?;
                 let card = BeatCardIdValue::from_core(press.card.clone());
                 if press.dragging {
                     let point = press.last;
+                    if let Some(generation) = press.generation { coordinator.finish_unclaimed(generation, BeatDragSource::BeatBoard); }
                     return Some(Command::BeatBoardCardGeometrySet { card, rect: BeatRectValue::from_core(final_rect(&press, preview(&press, point, board), board)), activate: true });
                 }
+                if let Some(generation) = press.generation { coordinator.finish_unclaimed(generation, BeatDragSource::BeatBoard); }
                 return Some(Command::BeatBoardCardActivate { card });
             }
             return None;
         }
+        if coordinator.active_for(BeatDragSource::BeatBoard).is_some() { return None; }
         if let Some(pos) = pos.filter(|p| response.hovered() && geometry.clip.contains(*p) && geometry.board_screen_rect().contains(*p)) {
             let target = hit(board, geometry, selection, pos);
             if let Some((id, mode)) = &target {
@@ -147,12 +191,27 @@ impl BeatInteraction {
                     // do not create a spatial press that can consume its drag.
                     if is_active_card(selection, &card) && matches!(mode, Mode::Text) { return None; }
                     let start = geometry.screen_to_board(pos);
-                    self.press = Some(Press { card, start_screen: pos, start, last: start, rect: card_rect(item.rect), mode, token, dragging: false });
+                    let generation = if matches!(mode, Mode::Move) {
+                        coordinator.begin(BeatDragSource::BeatBoard, card.clone(), Arc::clone(&document_identity), token, pos, pos)
+                    } else { None };
+                    if !matches!(mode, Mode::Move) || generation.is_some() {
+                        self.press = Some(Press { card, start_screen: pos, start, last: start, rect: card_rect(item.rect), mode, token, dragging: false, generation });
+                    }
                 } else {
                     return Some(Command::BeatBoardSelectionSet { selection: BeatSelectionValue::None });
                 }
             }
         }
         None
+    }
+
+    fn cancel_capture(&mut self, primary_down: bool, coordinator: &mut BeatDragCoordinator) {
+        if let Some(press) = self.press.take() {
+            if let Some(generation) = press.generation {
+                coordinator.cancel_generation(generation, BeatDragSource::BeatBoard);
+            }
+        }
+        self.scrollbars = ScrollbarInteraction::default();
+        let _ = primary_down;
     }
 }

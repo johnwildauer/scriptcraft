@@ -199,7 +199,10 @@ impl NativeMenuController {
                 availability.ruler_visible,
                 dynamic_elements,
                 formatting,
-                ViewMenuProjection::default(),
+                ViewMenuProjection {
+                    show_story_map: availability.story_map_visible,
+                    ..ViewMenuProjection::default()
+                },
                 dynamic_element_generation,
                 &mut element_submenu,
                 &mut zoom_submenu,
@@ -569,7 +572,13 @@ fn append_catalog_item(
                 RetainedNativeCommandItem::Checked(item)
             } else {
                 let item = MenuItem::with_id(spec.id,
-                    menu_item_label(spec, false, invisibles_visible, ruler_visible),
+                    menu_item_label(
+                        spec,
+                        false,
+                        invisibles_visible,
+                        ruler_visible,
+                        view.show_story_map,
+                    ),
                     availability.is_enabled(command), accelerator);
                 submenu.append(&item).map_err(|error| format!("could not append native menu item {}: {error}", spec.id))?;
                 RetainedNativeCommandItem::Plain(item)
@@ -590,7 +599,13 @@ fn append_catalog_item(
             let item = if requires_checked_native_item(spec) {
                 let item = CheckMenuItem::with_id(
                     spec.id,
-                    menu_item_label(spec, false, invisibles_visible, ruler_visible),
+                    menu_item_label(
+                        spec,
+                        false,
+                        invisibles_visible,
+                        ruler_visible,
+                        view.show_story_map,
+                    ),
                     availability.is_enabled(command_id),
                     menu_item_is_checked(spec, script_view_mode, formatting, view),
                     accelerator,
@@ -602,7 +617,13 @@ fn append_catalog_item(
             } else {
                 let item = MenuItem::with_id(
                     spec.id,
-                    menu_item_label(spec, false, invisibles_visible, ruler_visible),
+                    menu_item_label(
+                        spec,
+                        false,
+                        invisibles_visible,
+                        ruler_visible,
+                        view.show_story_map,
+                    ),
                     availability.is_enabled(command_id),
                     accelerator,
                 );
@@ -758,8 +779,13 @@ fn synchronize_entries(
             MenuEntrySpec::Item(spec) => {
                 let id = native_menu_id(spec);
                 if let Some((command, item)) = command_items.get(&id) {
-                    let label =
-                        menu_item_label(spec, say_undual, invisibles_visible, ruler_visible);
+                    let label = menu_item_label(
+                        spec,
+                        say_undual,
+                        invisibles_visible,
+                        ruler_visible,
+                        view.show_story_map,
+                    );
                     item.set_text(label);
                     item.set_enabled(availability.is_enabled(activation_command_id(command)));
                     item.set_checked(menu_item_is_checked(spec, script_view_mode, formatting, view));

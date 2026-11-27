@@ -64,6 +64,7 @@ pub(crate) struct Settings {
     pub(crate) theme: ThemeChoice,
     pub(crate) template: String,
     pub(crate) show_ruler: bool,
+    pub(crate) show_story_map: bool,
     pub(crate) toolbar: Vec<String>,
     pub(crate) title_page_toolbar: Vec<String>,
 }
@@ -75,6 +76,7 @@ impl Default for Settings {
             theme: ThemeChoice::System,
             template: DEFAULT_BUILTIN_TEMPLATE_ID.as_str().to_owned(),
             show_ruler: true,
+            show_story_map: false,
             toolbar: default_toolbar_ids(),
             title_page_toolbar: default_title_page_toolbar_ids(),
         }
@@ -209,6 +211,11 @@ impl SettingsStore {
         self.settings.show_ruler
     }
 
+    pub(crate) fn story_map_visible(&self) -> bool {
+        self.settings.show_story_map
+    }
+
+
     /// Updates the active theme and publishes only a real change.
     pub(crate) fn set_theme(&mut self, theme: ThemeChoice) -> bool {
         if self.settings.theme == theme {
@@ -238,6 +245,17 @@ impl SettingsStore {
         self.publish_snapshot();
         true
     }
+
+    /// Updates global Outline Editor visibility and publishes only a real change.
+    pub(crate) fn set_story_map_visible(&mut self, visible: bool) -> bool {
+        if self.settings.show_story_map == visible {
+            return false;
+        }
+        self.settings.show_story_map = visible;
+        self.publish_snapshot();
+        true
+    }
+
 
     /// Restores version-1 defaults and forces a write even when already equal.
     pub(crate) fn reset_to_defaults(&mut self) {

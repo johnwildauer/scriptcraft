@@ -105,6 +105,44 @@ pub(crate) struct BeatPaintPalette {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoryMapPalette {
+    pub(crate) strip_background: Color32,
+    pub(crate) lane_background: Color32,
+    pub(crate) label_background: Color32,
+    pub(crate) label_foreground: Color32,
+    pub(crate) text_foreground: Color32,
+    pub(crate) separator: Color32,
+    pub(crate) ruler_mark: Color32,
+    pub(crate) overflow_ruler_mark: Color32,
+    pub(crate) beat_fill: Color32,
+    pub(crate) beat_border: Color32,
+    pub(crate) beat_title: Color32,
+    pub(crate) beat_drag_fill: Color32,
+    pub(crate) beat_drag_border: Color32,
+    pub(crate) beat_drag_title: Color32,
+    pub(crate) beat_carried_fill: Color32,
+    pub(crate) beat_carried_border: Color32,
+    pub(crate) beat_carried_title: Color32,
+    pub(crate) beat_displaced_fill: Color32,
+    pub(crate) beat_displaced_border: Color32,
+    pub(crate) beat_displaced_title: Color32,
+    pub(crate) beat_propagated_fill: Color32,
+    pub(crate) beat_propagated_border: Color32,
+    pub(crate) beat_propagated_title: Color32,
+    pub(crate) beat_rejected_fill: Color32,
+    pub(crate) beat_rejected_border: Color32,
+    pub(crate) beat_rejected_title: Color32,
+    pub(crate) scene_fill: Color32,
+    pub(crate) scene_border: Color32,
+    pub(crate) scene_heading: Color32,
+    pub(crate) scene_caret: Color32,
+    pub(crate) scene_preview_body: Color32,
+    pub(crate) scene_preview_border: Color32,
+    pub(crate) scene_preview_notch: Color32,
+    pub(crate) scene_preview_text: Color32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ToolbarPalette {
     pub(crate) background: Color32,
     pub(crate) border: Color32,
@@ -199,6 +237,7 @@ pub(crate) struct FeedbackPalette {
 pub(crate) struct ApplicationPalette {
     pub(crate) toolbar: ToolbarPalette,
     pub(crate) script_workspace: ScriptWorkspacePalette,
+    pub(crate) story_map: StoryMapPalette,
     pub(crate) status: StatusPalette,
     pub(crate) controls: ControlPalette,
     pub(crate) overlays: OverlayPalette,
@@ -330,6 +369,10 @@ impl ApplicationPalette {
             ResolvedAppearance::Night => Color32::from_rgb(70, 70, 70),
             ResolvedAppearance::Midnight => Color32::from_rgb(60, 60, 60),
         };
+        let feedback = FeedbackPalette {
+            warning: visuals.warn_fg_color,
+            error: visuals.error_fg_color,
+        };
 
         Self {
             toolbar: ToolbarPalette {
@@ -354,6 +397,42 @@ impl ApplicationPalette {
                     hovered_handle: page.scrollbar_hovered,
                     dragged_handle: page.scrollbar_hovered,
                 },
+            },
+            story_map: StoryMapPalette {
+                strip_background: workspace_background,
+                lane_background: workspace_background,
+                label_background: page.paper,
+                label_foreground: page.text,
+                text_foreground: page.text,
+                separator: page.border,
+                ruler_mark: page.subdued_text,
+                overflow_ruler_mark: feedback.error,
+                beat_fill: page.paper,
+                beat_border: beat.unselected_card_border,
+                beat_title: page.text,
+                beat_drag_fill: alpha_color(page.selection, 112.0 / 255.0),
+                beat_drag_border: page.selection_boundary,
+                beat_drag_title: page.text,
+                beat_carried_fill: alpha_color(page.selection, 72.0 / 255.0),
+                beat_carried_border: alpha_color(page.selection_boundary, 0.78),
+                beat_carried_title: page.text,
+                beat_displaced_fill: alpha_color(feedback.warning, 72.0 / 255.0),
+                beat_displaced_border: feedback.warning,
+                beat_displaced_title: page.text,
+                beat_propagated_fill: alpha_color(page.selection_boundary, 56.0 / 255.0),
+                beat_propagated_border: page.selection_boundary,
+                beat_propagated_title: page.text,
+                beat_rejected_fill: alpha_color(feedback.error, 72.0 / 255.0),
+                beat_rejected_border: feedback.error,
+                beat_rejected_title: page.text,
+                scene_fill: alpha_color(page.selection, 24.0 / 255.0),
+                scene_border: beat.unselected_card_border,
+                scene_heading: page.text,
+                scene_caret: alpha_color(page.selection_boundary, 0.62),
+                scene_preview_body: page.paper,
+                scene_preview_border: page.border,
+                scene_preview_notch: page.paper,
+                scene_preview_text: page.text,
             },
             status: StatusPalette {
                 background: status_background,
@@ -404,10 +483,7 @@ impl ApplicationPalette {
                 window_shadow: visuals.window_shadow.color,
                 popup_shadow: visuals.popup_shadow.color,
             },
-            feedback: FeedbackPalette {
-                warning: visuals.warn_fg_color,
-                error: visuals.error_fg_color,
-            },
+            feedback,
         }
     }
 

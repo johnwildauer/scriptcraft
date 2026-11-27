@@ -229,7 +229,7 @@ pub(crate) fn import(root: &RawElement, project: &Project) -> Result<(BeatBoard,
                 text: String::new(), runs: Vec::new(), direct_settings: Default::default(),
             });
         }
-        cards.push(BeatCard { id, foreign_id, title: retained_attribute(list_item, "Title").unwrap_or("").to_owned(), paragraphs: body, rect: rectangle(item, width, height) });
+        cards.push(BeatCard { id, foreign_id, title: retained_attribute(list_item, "Title").unwrap_or("").to_owned(), paragraphs: body, rect: rectangle(item, width, height), story_map_placement: None });
     }
     let by_foreign_id = cards.iter().map(|card| (card.foreign_id.as_str(), card.id.clone()))
         .collect::<BTreeMap<_, _>>();

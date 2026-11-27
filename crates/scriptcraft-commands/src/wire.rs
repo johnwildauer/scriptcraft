@@ -426,7 +426,8 @@ impl<'de> Deserialize<'de> for RawParams {
 impl RawCommand {
     fn into_command(self, version: u16) -> Result<Command, String> {
         if matches!(self.id.as_str(), "editor.run-formatting.set" | "editor.paragraph-formatting.set"
-            | "beat-board.card.create" | "beat-board.card.activate" | "beat-board.card.geometry.set" | "beat-board.selection.set")
+            | "beat-board.card.create" | "beat-board.card.activate" | "beat-board.card.geometry.set" | "beat-board.selection.set"
+            | "story-map.beat.placement.set")
             && version != COMMAND_WIRE_VERSION
         {
             return Err("this command requires wire version 2".to_owned());

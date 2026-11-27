@@ -14,6 +14,109 @@ impl BeatCardIdValue {
     pub fn as_core(&self) -> &scriptcraft_model::StableId { &self.0 }
 }
 
+/// Durable Story Map lane identity accepted by the command boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StoryMapLaneIdValue(String);
+
+impl StoryMapLaneIdValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidStoryMapLaneId> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > scriptcraft_model::MAX_STORY_MAP_STRING_BYTES
+            || !value.chars().all(is_xml_compatible_story_map_character)
+        {
+            return Err(InvalidStoryMapLaneId);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn from_core(value: &str) -> Result<Self, InvalidStoryMapLaneId> {
+        Self::new(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_core(self) -> String {
+        self.0
+    }
+}
+
+impl Serialize for StoryMapLaneIdValue {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StoryMapLaneIdValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidStoryMapLaneId;
+
+impl std::fmt::Display for InvalidStoryMapLaneId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Story Map lane ID must be nonempty, bounded, and XML-compatible")
+    }
+}
+
+impl std::error::Error for InvalidStoryMapLaneId {}
+
+fn is_xml_compatible_story_map_character(character: char) -> bool {
+    matches!(character, '\u{9}' | '\u{A}' | '\u{D}')
+        || ('\u{20}'..='\u{D7FF}').contains(&character)
+        || ('\u{E000}'..='\u{FFFD}').contains(&character)
+        || ('\u{10000}'..='\u{10FFFF}').contains(&character)
+}
+
+const MAX_STORY_MAP_COMMAND_EIGHTHS: u32 =
+    (scriptcraft_model::MAX_STORY_MAP_TARGET_PAGES as u64
+        * scriptcraft_model::STORY_MAP_EIGHTHS_PER_PAGE) as u32;
+
+/// Nonnegative, target-bounded primary start position in exact eighths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct StoryMapStartEighthsValue(u32);
+
+impl StoryMapStartEighthsValue {
+    pub const fn new(value: u32) -> Option<Self> {
+        if value <= MAX_STORY_MAP_COMMAND_EIGHTHS { Some(Self(value)) } else { None }
+    }
+
+    pub const fn get(self) -> u32 { self.0 }
+}
+
+impl<'de> Deserialize<'de> for StoryMapStartEighthsValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u32::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| de::Error::custom("Story Map start eighths exceed the supported target bound"))
+    }
+}
+
+/// Positive, target-bounded primary length in exact eighths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct StoryMapLengthEighthsValue(u32);
+
+impl StoryMapLengthEighthsValue {
+    pub const fn new(value: u32) -> Option<Self> {
+        if value > 0 && value <= MAX_STORY_MAP_COMMAND_EIGHTHS { Some(Self(value)) } else { None }
+    }
+
+    pub const fn get(self) -> u32 { self.0 }
+}
+
+impl<'de> Deserialize<'de> for StoryMapLengthEighthsValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u32::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| de::Error::custom("Story Map length eighths must be positive and within the supported target bound"))
+    }
+}
+
 /// Stable ScriptNote identity accepted by the command wire format.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScriptNoteIdValue(scriptcraft_model::StableId);

@@ -365,6 +365,17 @@ impl ScreenplayLayout {
         })
     }
 
+    /// Returns the final canonical Body line through the existing Body line
+    /// index. Title-page lines are excluded, and no page or line rescan occurs.
+    pub fn last_body_line(&self) -> Option<LocatedLayoutLine<'_>> {
+        let entry = self.body_line_index.last()?;
+        let line = self.pages.get(entry.location.page)?.lines.get(entry.location.line)?;
+        Some(LocatedLayoutLine {
+            page_index: entry.location.page,
+            line,
+        })
+    }
+
     /// First page owning this element/source range in the same page-and-line
     /// order used by the former complete-layout owner scan.
     pub fn page_for_position_with_diagnostics(

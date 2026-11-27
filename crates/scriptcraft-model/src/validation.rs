@@ -23,6 +23,10 @@ use crate::{
     },
     project::Project,
     script_notes::{ScriptNoteIdentity, ScriptNotes},
+    story_map::{
+        StoryMap, StoryMapPlacement, MAX_STORY_MAP_LANES, MAX_STORY_MAP_STRING_BYTES,
+        MAX_STORY_MAP_TARGET_PAGES,
+    },
     ModelError, MAX_TEXT_BYTES,
 };
 
@@ -103,6 +107,7 @@ fn foreign_identity(domain: ForeignIdDomain, value: &str) -> Result<ForeignIdent
 
 fn validate_beat_board(
     board: &BeatBoard,
+    story_map: &StoryMap,
     ids: &mut BTreeSet<StableId>,
     preservation: Option<&PreservationState>,
 ) -> Result<(), ModelError> {
@@ -146,6 +151,9 @@ fn validate_beat_board(
         if card.title.contains(['\r', '\n']) {
             return Err(ModelError::InvalidRunProjection);
         }
+        if let Some(placement) = &card.story_map_placement {
+            validate_story_map_placement(placement, story_map)?;
+        }
         if card.rect.width < MIN_CARD_WIDTH
             || card.rect.width > MAX_CARD_WIDTH
             || card.rect.height < MIN_CARD_HEIGHT
@@ -177,6 +185,97 @@ fn validate_beat_board(
     }
     if let Some(preservation) = preservation {
         validate_beat_graph_coherence(board_id.as_ref(), &card_ids, preservation)?;
+    }
+    Ok(())
+}
+
+fn validate_story_map_placement(
+    placement: &StoryMapPlacement,
+    story_map: &StoryMap,
+) -> Result<(), ModelError> {
+    validate_bounded_xml_string(&placement.lane_uuid, MAX_STORY_MAP_STRING_BYTES)?;
+    foreign_identity(ForeignIdDomain::Other("StoryMapLane".to_owned()), &placement.lane_uuid)?;
+    let lane_matches = story_map
+        .lanes
+        .iter()
+        .filter(|lane| lane.uuid == placement.lane_uuid)
+        .count();
+    let target_eighths = story_map
+        .target_eighths()
+        .ok_or(ModelError::InvalidNumber)?;
+    let end = placement
+        .checked_end_eighths()
+        .filter(|_| placement.length_eighths > 0)
+        .ok_or(ModelError::InvalidNumber)?;
+    if lane_matches != 1 || end > target_eighths {
+        return Err(ModelError::InvalidNumber);
+    }
+    Ok(())
+}
+
+fn validate_story_map(story_map: &StoryMap, beat_board: &BeatBoard) -> Result<(), ModelError> {
+    if story_map.target_pages == 0
+        || story_map.target_pages > MAX_STORY_MAP_TARGET_PAGES
+        || story_map.target_eighths().is_none()
+    {
+        return Err(ModelError::InvalidNumber);
+    }
+    if story_map.lanes.len() > MAX_STORY_MAP_LANES {
+        return Err(ModelError::TooManyElements);
+    }
+
+    let mut owned_foreign_values = BTreeSet::new();
+    if let Some(board_id) = &story_map.foreign_id {
+        validate_bounded_xml_string(board_id, MAX_STORY_MAP_STRING_BYTES)?;
+        foreign_identity(ForeignIdDomain::Board, board_id)?;
+        owned_foreign_values.insert(board_id.as_str());
+        if beat_board.foreign_id.as_deref() == Some(board_id.as_str()) {
+            return Err(ModelError::DuplicateId);
+        }
+    }
+
+    let mut aggregate_text_bytes = story_map.foreign_id.as_ref().map_or(0usize, String::len);
+    for lane in &story_map.lanes {
+        validate_bounded_xml_string(&lane.uuid, MAX_STORY_MAP_STRING_BYTES)?;
+        foreign_identity(
+            ForeignIdDomain::Other("StoryMapLane".to_owned()),
+            &lane.uuid,
+        )?;
+        validate_bounded_xml_string(&lane.label, MAX_STORY_MAP_STRING_BYTES)?;
+        validate_bounded_xml_string(&lane.lane_type, MAX_STORY_MAP_STRING_BYTES)?;
+        if lane.lane_type.is_empty() {
+            return Err(ModelError::InvalidRunProjection);
+        }
+        if !owned_foreign_values.insert(lane.uuid.as_str()) {
+            return Err(ModelError::DuplicateId);
+        }
+        aggregate_text_bytes = aggregate_text_bytes
+            .checked_add(lane.uuid.len())
+            .and_then(|bytes| bytes.checked_add(lane.label.len()))
+            .and_then(|bytes| bytes.checked_add(lane.lane_type.len()))
+            .filter(|bytes| *bytes <= MAX_TEXT_BYTES)
+            .ok_or(ModelError::TextTooLong)?;
+    }
+
+    // Native identities are source-owned strings. Reject overlap with the
+    // existing semantic Beat board/ListItems so an owner cannot be ambiguous.
+    let mut beat_foreign_values = BTreeSet::new();
+    if let Some(id) = &beat_board.foreign_id {
+        beat_foreign_values.insert(id.as_str());
+    }
+    for card in &beat_board.cards {
+        beat_foreign_values.insert(card.foreign_id.as_str());
+        for paragraph in &card.paragraphs {
+            if let Some(id) = paragraph.foreign_id.as_deref() {
+                beat_foreign_values.insert(id);
+            }
+        }
+    }
+    if owned_foreign_values
+        .iter()
+        .any(|identity| beat_foreign_values.contains(identity))
+    {
+        return Err(ModelError::DuplicateId);
     }
     Ok(())
 }
@@ -489,7 +588,13 @@ impl Project {
                 return Err(ModelError::DuplicateId);
             }
         }
-        validate_beat_board(self.beat_board(), &mut ids, self.preservation.as_ref())?;
+        validate_story_map(self.story_map(), self.beat_board())?;
+        validate_beat_board(
+            self.beat_board(),
+            self.story_map(),
+            &mut ids,
+            self.preservation.as_ref(),
+        )?;
         validate_script_notes(self.script_notes(), self, &mut ids)?;
         if self
             .direct_paragraph_overrides

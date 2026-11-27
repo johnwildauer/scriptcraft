@@ -49,6 +49,7 @@ pub(crate) fn command_for_id(id: CommandId) -> Option<Command> {
         CommandId::FileExportFountain => Command::FileExportFountain,
         CommandId::ViewInvisiblesToggle => Command::ViewInvisiblesToggle,
         CommandId::ViewRulerToggle => Command::ViewRulerToggle,
+        CommandId::ViewOutlineEditorToggle => Command::ViewOutlineEditorToggle,
         CommandId::ViewBeatBoardShow => Command::ViewBeatBoardShow,
         CommandId::FilePrint => Command::FilePrint,
         CommandId::ApplicationQuit => Command::ApplicationQuit,
@@ -385,7 +386,8 @@ impl ScriptCraftApp {
             command @ (Command::WindowTitlePageOpen
             | Command::WindowTitlePageClose
             | Command::ViewInvisiblesToggle
-            | Command::ViewRulerToggle) => self.dispatch_view_command(command, ctx),
+            | Command::ViewRulerToggle
+            | Command::ViewOutlineEditorToggle) => self.dispatch_view_command(command, ctx),
             command @ (Command::FormatElementsOpen
             | Command::FormatElementsClose
             | Command::FormatTemplateSelectorOpen
@@ -417,6 +419,7 @@ impl ScriptCraftApp {
             | Command::BeatBoardCardActivate { .. }
             | Command::BeatBoardCardGeometrySet { .. }
             | Command::BeatBoardCardDelete { .. }
+            | Command::StoryMapBeatPlacementSet { .. }
             | Command::BeatBoardSelectionSet { .. }
             | Command::BeatBoardTextEdit { .. }
             | Command::BeatBoardNavigation { .. }

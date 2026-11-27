@@ -280,7 +280,8 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
     )?;
     preservation.rebuild_indexes();
     project.validate().map_err(map_model_error)?;
-    let (beat_board, beat_board_view_state) = crate::beat_board::import(root, &project)?;
+    let (mut beat_board, beat_board_view_state) = crate::beat_board::import(root, &project)?;
+    let story_map_view_state = crate::story_map::import(root, &mut project, &mut beat_board)?;
     project.replace_beat_board(beat_board).map_err(map_model_error)?;
     crate::script_notes::import(root, &mut project)?;
     project.validate().map_err(map_model_error)?;
@@ -299,6 +300,7 @@ pub fn read_v6(input: &[u8]) -> Result<FdxDocument, FdxError> {
         display_mode,
         invisibles,
         beat_board_view_state,
+        story_map_view_state,
     })
 }
 

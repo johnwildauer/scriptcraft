@@ -92,6 +92,13 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) session: EditingSession,
     pub(crate) invisibles: scriptcraft_fdx::InvisiblesState,
     pub(crate) beat_board_view_state: scriptcraft_fdx::BeatBoardViewState,
+    pub(crate) story_map_view_state: scriptcraft_fdx::StoryMapViewState,
+    pub(crate) story_map_resize: crate::views::story_map::StoryMapResizeState,
+    pub(crate) story_map_navigation: crate::views::story_map::StoryMapNavigationState,
+    pub(crate) story_map_beat_interaction: crate::views::story_map::StoryMapBeatInteractionState,
+    pub(crate) beat_drag_coordinator: crate::views::beat_drag::BeatDragCoordinator,
+    pub(crate) story_map_projection: crate::views::story_map::StoryMapProjectionState,
+    pub(crate) story_map_preview: crate::views::story_map::StoryMapPreviewState,
     pub(crate) root_document_view: RootDocumentView,
     pub(crate) beat_pinch_zoom_percent: f64,
     pub(crate) beat_viewport: Option<crate::views::beat_board::geometry::ViewportGeometry>,
@@ -243,6 +250,7 @@ impl ScriptCraftApp {
         let script_view_mode = Self::script_view_mode_from_fdx(builtin_document.display_mode);
         let invisibles = builtin_document.invisibles;
         let beat_board_view_state = builtin_document.beat_board_view_state;
+        let story_map_view_state = builtin_document.story_map_view_state;
         let project = builtin_document.project;
         let session = EditingSession::with_policy(project, EditPolicy::default())
             .map_err(|error| format!("session failed: {error:?}"))?;
@@ -256,6 +264,13 @@ impl ScriptCraftApp {
             session,
             invisibles,
             beat_board_view_state,
+            story_map_view_state,
+            story_map_resize: crate::views::story_map::StoryMapResizeState::default(),
+            story_map_navigation: crate::views::story_map::StoryMapNavigationState::default(),
+            story_map_beat_interaction: crate::views::story_map::StoryMapBeatInteractionState::default(),
+            beat_drag_coordinator: crate::views::beat_drag::BeatDragCoordinator::default(),
+            story_map_projection: crate::views::story_map::StoryMapProjectionState::default(),
+            story_map_preview: crate::views::story_map::StoryMapPreviewState::default(),
             root_document_view: RootDocumentView::Script,
             beat_pinch_zoom_percent: f64::from(beat_board_view_state.zoom_milli_percent()) / 1000.0,
             beat_viewport: None,

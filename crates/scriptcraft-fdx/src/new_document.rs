@@ -269,11 +269,15 @@ pub(crate) fn make_new_document_nodes(
     )?;
     crate::beat_board_output::append_generated_board(&mut root, project, context)?;
     crate::script_notes_output::append_generated_script_notes(&mut root, project)?;
-    Ok(vec![PreservedNode::Element(root)])
+    let mut nodes = vec![PreservedNode::Element(root)];
+    crate::story_map_output::project_generated(&mut nodes, project, context)?;
+    Ok(nodes)
 }
 
 fn project_beat_ids(project: &Project) -> BTreeSet<String> {
     let mut reserved = BTreeSet::new();
+    if let Some(id) = &project.story_map().foreign_id { reserved.insert(id.clone()); }
+    reserved.extend(project.story_map().lanes.iter().map(|lane| lane.uuid.clone()));
     if let Some(id) = &project.beat_board().foreign_id { reserved.insert(id.clone()); }
     for card in &project.beat_board().cards {
         reserved.insert(card.foreign_id.clone());

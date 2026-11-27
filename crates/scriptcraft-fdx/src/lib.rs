@@ -31,6 +31,9 @@ mod settings;
 mod script_notes;
 mod script_notes_candidate;
 mod script_notes_output;
+mod story_map;
+mod story_map_candidate;
+mod story_map_output;
 mod split_state;
 mod text_state;
 mod title_page;
@@ -44,6 +47,7 @@ mod writer;
 pub use apply_template::{extract_element_template_settings, ElementTemplateSettings};
 pub use builtin_template_preview::builtin_template_preview_description;
 pub use beat_board_candidate::{finalize_beat_board_candidate, prepare_beat_board_candidate};
+pub use story_map_candidate::finalize_story_map_candidate;
 pub use script_notes_candidate::finalize_script_notes_candidate;
 pub use builtin_templates::{
     builtin_template_metadata, builtin_templates, instantiate_builtin_template, BuiltinTemplateId,
@@ -56,7 +60,7 @@ pub use diagnostics::{
 pub use document::{
     BeatBoardViewState, FdxDocument, FdxImportCandidate, FdxImportDiagnostic, FdxImportDiagnostics, FdxImportOutcome,
     FdxMigrationConsent, FdxMigrationKind, FdxVersionDirection, FdxVersionStatus, InvisiblesColor,
-    InvisiblesState, ScriptPanelDisplayMode, WindowState, MAX_FDX_IMPORT_DIAGNOSTICS,
+    InvisiblesState, ScriptPanelDisplayMode, StoryMapViewState, WindowState, MAX_FDX_IMPORT_DIAGNOSTICS,
 };
 pub use element_settings::{reconcile_project_element_settings, replace_project_element_settings};
 pub use import::import_fdx;
@@ -70,6 +74,9 @@ pub use text_state::{
     flat_offset_to_position, parse_flat_selection, selection_to_flat_offsets, TextState,
     MAX_TEXT_SCALING, MIN_TEXT_SCALING,
 };
-pub use verification::{same_beat_board_projection, same_dual_dialogue_projection, same_script_notes_projection};
+pub use verification::{
+    same_beat_board_projection, same_dual_dialogue_projection, same_script_notes_projection,
+    same_story_map_projection,
+};
 pub use version::preflight_version;
 pub use writer::{write_v6, write_v6_for_save, write_v6_for_transactional_save};

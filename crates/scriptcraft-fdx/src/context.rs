@@ -1,6 +1,9 @@
 use crate::{
     diagnostics::{FdxError, SaveDiagnosticCode},
-    document::{BeatBoardViewState, InvisiblesState, ScriptPanelDisplayMode, WindowState},
+    document::{
+        BeatBoardViewState, InvisiblesState, ScriptPanelDisplayMode, StoryMapViewState,
+        WindowState,
+    },
     text_state::TextState,
 };
 use std::collections::BTreeSet;
@@ -25,6 +28,7 @@ pub struct SaveContext {
     display_mode: ScriptPanelDisplayMode,
     invisibles_state: InvisiblesState,
     beat_board_view_state: BeatBoardViewState,
+    story_map_view_state: StoryMapViewState,
 }
 
 impl SaveContext {
@@ -38,6 +42,7 @@ impl SaveContext {
             display_mode: ScriptPanelDisplayMode::Page,
             invisibles_state: InvisiblesState::default(),
             beat_board_view_state: BeatBoardViewState::default(),
+            story_map_view_state: StoryMapViewState::default(),
         }
     }
 
@@ -72,6 +77,12 @@ impl SaveContext {
         self
     }
 
+    /// Capture disposable Story Map view values for transactional output.
+    pub fn with_story_map_view_state(mut self, state: StoryMapViewState) -> Self {
+        self.story_map_view_state = state;
+        self
+    }
+
     pub(crate) const fn operation(&self) -> SaveOperation {
         self.operation
     }
@@ -102,6 +113,10 @@ impl SaveContext {
 
     pub(crate) const fn beat_board_view_state(&self) -> BeatBoardViewState {
         self.beat_board_view_state
+    }
+
+    pub(crate) const fn story_map_view_state(&self) -> StoryMapViewState {
+        self.story_map_view_state
     }
 
     pub(crate) fn allocate_lineage_id(

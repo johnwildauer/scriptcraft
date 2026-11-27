@@ -556,6 +556,7 @@ impl ScriptCraftApp {
                     document.invisibles,
                     display_mode,
                     document.beat_board_view_state,
+                    document.story_map_view_state,
                 ))
             }
             Ok(FdxImportOutcome::Cancelled { .. }) => {
@@ -581,6 +582,7 @@ impl ScriptCraftApp {
         invisibles: fdx::InvisiblesState,
         display_mode: fdx::ScriptPanelDisplayMode,
         beat_board_view_state: fdx::BeatBoardViewState,
+        story_map_view_state: fdx::StoryMapViewState,
     ) -> Result<(), StagedOpenOutcome> {
         let (native_path, fdx_baseline) = match persistence {
             ActivationPersistence::Saved { path, baseline } => {
@@ -617,19 +619,27 @@ impl ScriptCraftApp {
                 )
             });
         if !restored_selection {
-            if let Ok(selection) =
-                scriptcraft_commands::Selection::from_core(Selection::caret(Position {
+            let fallback_restored = scriptcraft_commands::Selection::from_core(Selection::caret(
+                Position {
                     element: 0,
                     offset: 0,
-                }))
-            {
-                let _ = scriptcraft_commands::execute_editor_command(
-                    &mut replacement,
-                    &Command::EditorSelectionSet {
-                        selection,
-                        surface: EditorSurface::Body,
-                    },
-                );
+                },
+            ))
+            .ok()
+            .map(|selection| Command::EditorSelectionSet {
+                selection,
+                surface: EditorSurface::Body,
+            })
+            .is_some_and(|command| {
+                matches!(
+                    scriptcraft_commands::execute_editor_command(&mut replacement, &command),
+                    scriptcraft_commands::CommandOutcome::Changed
+                        | scriptcraft_commands::CommandOutcome::NoOp
+                )
+            });
+            if !fallback_restored {
+                self.show_error("FDX_SESSION_SELECTION_RESTORE_FAILED: active document unchanged");
+                return Err(StagedOpenOutcome::Failed);
             }
         }
         let script_view_mode = Self::script_view_mode_from_fdx(display_mode);
@@ -640,6 +650,13 @@ impl ScriptCraftApp {
         self.script_view_mode = script_view_mode;
         self.invisibles = invisibles;
         self.beat_board_view_state = beat_board_view_state;
+        self.story_map_view_state = story_map_view_state;
+        self.story_map_resize.reset();
+        self.story_map_navigation.reset();
+        self.story_map_beat_interaction.reset();
+        self.beat_drag_coordinator.reset();
+        self.story_map_projection.reset_document();
+        self.story_map_preview.close();
         self.beat_pinch_zoom_percent = f64::from(beat_board_view_state.zoom_milli_percent()) / 1000.0;
         self.beat_viewport = None;
         self.beat_interaction.cancel();

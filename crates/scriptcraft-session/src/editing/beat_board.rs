@@ -325,7 +325,7 @@ impl EditingSession {
         Ok(())
     }
 
-    fn publish_beat(&mut self, project: Project, selection: BeatSelection) -> Result<(), EditError> {
+    pub(super) fn publish_beat(&mut self, project: Project, selection: BeatSelection) -> Result<(), EditError> {
         let previous_selection = self.beat_selection.clone();
         validate_beat_selection(&project, &selection)?;
         let changed = project != self.project;
@@ -492,7 +492,8 @@ impl EditingSession {
         settings.paragraph.spacing = Some(ParagraphSpacing::Single);
         settings.starts_new_page = Some(false);
         board.cards.push(BeatCard { id: card_id.clone(), foreign_id: foreign_id.clone(), title: String::new(),
-            paragraphs: vec![BeatParagraph { id: paragraph_id, foreign_id: Some(foreign_paragraph.clone()), source_paragraph_ordinal: None, text: String::new(), runs: Vec::new(), direct_settings: settings }], rect });
+            paragraphs: vec![BeatParagraph { id: paragraph_id, foreign_id: Some(foreign_paragraph.clone()), source_paragraph_ordinal: None, text: String::new(), runs: Vec::new(), direct_settings: settings }], rect,
+            story_map_placement: None });
         board.card_creation_order.push(card_id.clone());
         let mut candidate = self.project.clone();
         register_new_graph(&mut candidate, board.foreign_id.as_deref().ok_or(EditError::InvalidElement)?, &foreign_id, &foreign_paragraph)?;

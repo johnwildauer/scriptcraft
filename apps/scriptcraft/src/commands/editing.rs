@@ -86,6 +86,7 @@ impl ScriptCraftApp {
                 | Command::BeatBoardCardGeometrySet { .. } | Command::BeatBoardSelectionSet { .. }
                 | Command::BeatBoardTextEdit { .. } | Command::BeatBoardNavigation { .. }
                 | Command::BeatBoardCardDelete { .. }
+                | Command::StoryMapBeatPlacementSet { .. }
                 | Command::BeatBoardStyleToggle { .. } | Command::BeatBoardStyleClear
                 | Command::BeatBoardRunFormattingSet { .. }) =>
                 self.execute_editor(&command, RevealIntent::None, ctx),
@@ -299,7 +300,8 @@ impl ScriptCraftApp {
             | Command::BeatBoardCardGeometrySet { .. } | Command::BeatBoardCardDelete { .. } | Command::BeatBoardSelectionSet { .. }
             | Command::BeatBoardTextEdit { .. } | Command::BeatBoardNavigation { .. }
             | Command::BeatBoardStyleToggle { .. } | Command::BeatBoardStyleClear
-            | Command::BeatBoardRunFormattingSet { .. });
+            | Command::BeatBoardRunFormattingSet { .. }
+            | Command::StoryMapBeatPlacementSet { .. });
         if self.development_mode {
             self.session.begin_mutation_diagnostics();
         }
@@ -350,6 +352,17 @@ impl ScriptCraftApp {
                 && matches!(&outcome, CommandOutcome::NoOp))
         {
             self.reconcile_body_active_group();
+        }
+        if matches!(command, Command::StoryMapBeatPlacementSet { .. }) {
+            // The one-shot placement intent has already been consumed. Its fresh
+            // command result is terminal for preview state; never reconstruct it.
+            self.story_map_beat_interaction.complete_terminal_command();
+        } else if matches!(&outcome, CommandOutcome::Changed) {
+            let primary_down = ctx.input(|input| input.pointer.primary_down());
+            self.story_map_beat_interaction.reconcile_semantic_change(
+                primary_down,
+                &mut self.beat_drag_coordinator,
+            );
         }
         ctx.request_repaint();
         match outcome {

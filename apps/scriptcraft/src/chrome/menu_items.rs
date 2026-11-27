@@ -96,6 +96,7 @@ pub(crate) struct ViewMenuProjection {
     pub(crate) zoom_percent: u16,
     pub(crate) appearance_mode: super::theme::AppearanceMode,
     pub(crate) beat_board: bool,
+    pub(crate) show_story_map: bool,
 }
 
 impl Default for ViewMenuProjection {
@@ -104,6 +105,7 @@ impl Default for ViewMenuProjection {
             zoom_percent: 100,
             appearance_mode: super::theme::AppearanceMode::System,
             beat_board: false,
+            show_story_map: false,
         }
     }
 }
@@ -226,6 +228,7 @@ pub(crate) fn menu_item_label(
     say_undual: bool,
     invisibles_visible: bool,
     ruler_visible: bool,
+    show_story_map: bool,
 ) -> &'static str {
     match item.behavior {
         MenuItemBehavior::Command(CommandId::EditorDualDialogueToggle) if say_undual => {
@@ -237,6 +240,10 @@ pub(crate) fn menu_item_label(
         MenuItemBehavior::Command(CommandId::ViewInvisiblesToggle) => "Show Invisibles",
         MenuItemBehavior::Command(CommandId::ViewRulerToggle) if ruler_visible => "Hide Ruler",
         MenuItemBehavior::Command(CommandId::ViewRulerToggle) => "Show Ruler",
+        MenuItemBehavior::Command(CommandId::ViewOutlineEditorToggle) if show_story_map => {
+            "Hide Outline Editor"
+        }
+        MenuItemBehavior::Command(CommandId::ViewOutlineEditorToggle) => "Show Outline Editor",
         _ => item.label,
     }
 }
@@ -774,12 +781,14 @@ const VIEW_ENTRIES: &[MenuEntrySpec] = &[
         None,
     ),
     SEP,
-    placeholder(
+    command_item(
         "view.outline-editor",
         "Show Outline Editor",
-        "Show Outline Editor (disabled placeholder)",
-        ITEM,
+        "Show Outline Editor",
+        None,
         Some(primary_shortcut(ShortcutKey::M, true)),
+        None,
+        CommandId::ViewOutlineEditorToggle,
     ),
     command_item(
         "view.ruler",

@@ -6,8 +6,10 @@ use scriptcraft_layout::{BeatCardMetrics, LayoutEnvironment};
 use scriptcraft_model::BeatBoard;
 use scriptcraft_session::editing::BeatSelection;
 use scriptcraft_commands::Command;
+use crate::views::beat_drag::{BeatDragCoordinator, BeatDragSource};
+use std::sync::Arc;
 
-pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardViewState, published: &mut Option<ViewportGeometry>, palette: ScriptWorkspacePalette, cache: &mut BeatLayoutCache, prepared: Option<(&LayoutEnvironment, &PreparedDocumentFonts)>, selection: &BeatSelection, token: u64, interaction: &mut BeatInteraction, text_state: &mut BeatTextState, enabled: bool, card_delete_keyboard_enabled: bool) -> (bool, Vec<Command>) {
+pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardViewState, published: &mut Option<ViewportGeometry>, palette: ScriptWorkspacePalette, cache: &mut BeatLayoutCache, prepared: Option<(&LayoutEnvironment, &PreparedDocumentFonts)>, selection: &BeatSelection, token: u64, document_identity: Arc<()>, interaction: &mut BeatInteraction, text_state: &mut BeatTextState, coordinator: &mut BeatDragCoordinator, enabled: bool, card_delete_keyboard_enabled: bool) -> (bool, Vec<Command>) {
     let mut success = true;
     cache.retain_board(board);
     let (rect, _) = ui.allocate_exact_size(ui.available_size().max(egui::Vec2::ZERO), egui::Sense::hover());
@@ -16,14 +18,18 @@ pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardVie
     let pointer = ui.ctx().input(|input| input.pointer.hover_pos());
     interaction.observe_view(ui.ctx(), *view);
     let mut geometry = ViewportGeometry::new(rect, ui.clip_rect(), board, *view, pointer);
-    let scrollbar_consumed = interaction.handle_scrollbars(ui, geometry, view, token, enabled);
+    let scrollbar_consumed = interaction.handle_scrollbars(ui, geometry, view, token, enabled, coordinator);
     geometry = geometry.with_view(*view);
-    let spatial_command = if scrollbar_consumed { None } else { interaction.input(ui, &response, geometry, board, selection, token, enabled) };
+    let spatial_command = if scrollbar_consumed { None } else { interaction.input(ui, &response, geometry, board, selection, token, Arc::clone(&document_identity), enabled, coordinator) };
     let preview = interaction.preview_card(board, geometry, ui.ctx().input(|i| i.pointer.interact_pos()));
     *view = geometry.view;
     let mut commands = spatial_command.into_iter().collect::<Vec<_>>();
     if commands.iter().any(|command| matches!(command, Command::BeatBoardCardActivate { .. } | Command::BeatBoardCardGeometrySet { .. }
         | Command::BeatBoardSelectionSet { selection: scriptcraft_commands::BeatSelectionValue::Card { .. } | scriptcraft_commands::BeatSelectionValue::None })) {
+        if let Some(id) = text_state.viewport_id { ui.ctx().memory_mut(|memory| memory.surrender_focus(id)); }
+        text_state.blur();
+    }
+    if coordinator.external_engaged() && text_state.focused {
         if let Some(id) = text_state.viewport_id { ui.ctx().memory_mut(|memory| memory.surrender_focus(id)); }
         text_state.blur();
     }
@@ -90,7 +96,7 @@ pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardVie
             }
         }
     }
-    if commands.is_empty() && enabled && !scrollbar_consumed {
+    if commands.is_empty() && enabled && !scrollbar_consumed && !coordinator.external_engaged() {
         let selected_id = match selection { BeatSelection::Card { card } | BeatSelection::Text { card, .. } => Some(card), _ => None };
         if let (Some(card), Some((environment, fonts))) = (selected_id.and_then(|id| board.cards.iter().find(|card| &card.id == id)), prepared) {
             if let Ok(layouts) = cache.get_or_build(card, environment, fonts, BeatCardMetrics::default()) {

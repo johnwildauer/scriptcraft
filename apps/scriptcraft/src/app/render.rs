@@ -45,6 +45,7 @@ impl ScriptCraftApp {
         let card_delete_keyboard_enabled = command_availability.beat_card_delete
             && !menu_popup_blocked && !sprint_popup_blocked
             && crate::chrome::shortcuts::shortcut_input_allowed(self.ime_active, ime_event_in_frame);
+        let document_identity = self.session.project().layout_identity().clone();
         let (success, command) = crate::views::beat_board::show(
             ui,
             self.session.project().beat_board(),
@@ -55,8 +56,10 @@ impl ScriptCraftApp {
             environment.as_ref().zip(prepared.as_ref()),
             self.session.beat_selection(),
             self.session.mutation_token(),
+            document_identity,
             &mut self.beat_interaction,
             &mut self.beat_text,
+            &mut self.beat_drag_coordinator,
             available,
             card_delete_keyboard_enabled,
         );

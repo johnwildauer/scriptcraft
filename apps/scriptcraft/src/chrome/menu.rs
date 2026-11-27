@@ -502,6 +502,7 @@ fn measured_menu_text_width(ui: &egui::Ui, text: &str, font_id: egui::FontId) ->
 fn menu_content_metrics(
     ui: &egui::Ui,
     entries: &[MenuEntrySpec],
+    view: ViewMenuProjection,
     say_undual: bool,
     invisibles_visible: bool,
     ruler_visible: bool,
@@ -521,7 +522,13 @@ fn menu_content_metrics(
             MenuEntrySpec::Item(item) => {
                 let label_width = measured_menu_text_width(
                     ui,
-                    menu_item_label(item, say_undual, invisibles_visible, ruler_visible),
+                    menu_item_label(
+                        item,
+                        say_undual,
+                        invisibles_visible,
+                        ruler_visible,
+                        view.show_story_map,
+                    ),
                     item_font.clone(),
                 );
                 let shortcut = menu_shortcut_label(item);
@@ -716,6 +723,7 @@ fn render_menu_popup(
     let content = menu_content_metrics(
         ui,
         entries,
+        view,
         say_undual,
         invisibles_visible,
         ruler_visible,
@@ -986,7 +994,13 @@ fn render_menu_entries(
                     }),
                     MenuItemBehavior::DisabledPlaceholder(_) => false,
                 };
-                let label = menu_item_label(item, say_undual, invisibles_visible, ruler_visible);
+                let label = menu_item_label(
+                    item,
+                    say_undual,
+                    invisibles_visible,
+                    ruler_visible,
+                    view.show_story_map,
+                );
                 let shortcut = menu_shortcut_label(item);
                 let icon_atom = menu_icon_atom(
                     item,

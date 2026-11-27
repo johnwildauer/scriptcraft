@@ -1,0 +1,57 @@
+pub(crate) const LABEL_COLUMN_WIDTH: f32 = 90.0;
+pub(crate) const PAGE_RULER_ROW_HEIGHT: f32 = 24.0;
+pub(crate) const MIN_STRIP_HEIGHT: f32 = 90.0;
+pub(crate) const RESIZE_HIT_BAND_HEIGHT: f32 = 5.0;
+pub(crate) const MAX_STRIP_HEIGHT: f32 = 1_000_000.0;
+
+pub(crate) const UN_SCALED_TARGET_WIDTH: f64 = 2_000.0;
+pub(crate) const ZOOM_PERCENT_PER_TARGET_PAGE: f64 = 12.0;
+pub(crate) const STORY_MAP_SLIDER_WIDTH: f32 = 120.0;
+pub(crate) const STORY_MAP_SCROLLBAR_MIN_THUMB: f32 = 24.0;
+pub(crate) const STORY_MAP_SCROLLBAR_THICKNESS: f32 = 8.0;
+pub(crate) const STORY_MAP_SCROLLBAR_HIT_EXPANSION: f32 = 3.0;
+pub(crate) const STORY_MAP_WHEEL_POINTS_PER_LINE: f64 = 24.0;
+pub(crate) const STORY_MAP_SCROLLBAR_HIDE_SECONDS: u64 = 1;
+pub(crate) const PROJECTION_QUIET_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
+pub(crate) const RULER_WHOLE_PAGE_TICK_HEIGHT: f32 = 6.0;
+pub(crate) const RULER_EIGHTH_TICK_HEIGHT: f32 = 3.0;
+pub(crate) const RULER_STROKE_DEVICE_PIXELS: f64 = 1.0;
+pub(crate) const RULER_LABEL_DENSITY_EVERY_PAGE: f64 = 64.0;
+pub(crate) const RULER_LABEL_DENSITY_EVEN_PAGES: f64 = 32.0;
+pub(crate) const RULER_LABEL_DENSITY_FIFTH_PAGES: f64 = 16.0;
+pub(crate) const RULER_LABEL_FONT_SIZE: f32 = 10.0;
+pub(crate) const RULER_LABEL_INSET: f32 = 4.0;
+pub(crate) const RULER_LABEL_TOP_INSET: f32 = 1.0;
+pub(crate) const LANE_LABEL_INSET: f32 = 8.0;
+pub(crate) const LANE_LABEL_FONT_SIZE: f32 = 13.0;
+pub(crate) const STATIC_BEAT_HORIZONTAL_INSET: f32 = 6.0;
+pub(crate) const STATIC_BEAT_VERTICAL_INSET: f32 = 4.0;
+pub(crate) const STATIC_BEAT_TITLE_FONT_SIZE: f32 = 12.0;
+pub(crate) const STATIC_BEAT_CORNER_RADIUS: f32 = 3.0;
+pub(crate) const STATIC_BEAT_BORDER_WIDTH: f32 = 1.0;
+pub(crate) const STORY_MAP_BEAT_DRAG_THRESHOLD: f32 = 3.0;
+pub(crate) const STORY_MAP_BEAT_TAIL_TARGET: f32 = 5.0;
+pub(crate) const STORY_MAP_BEAT_GHOST_CORNER_RADIUS: f32 = 3.0;
+pub(crate) const STORY_MAP_BEAT_GHOST_BORDER_WIDTH: f32 = 1.5;
+
+pub(crate) const SCENE_BLOCK_VERTICAL_INSET: f32 = 4.0;
+pub(crate) const SCENE_BLOCK_HORIZONTAL_INSET: f32 = 6.0;
+pub(crate) const SCENE_BLOCK_TITLE_FONT_SIZE: f32 = 12.0;
+pub(crate) const SCENE_BLOCK_CORNER_RADIUS: f32 = 3.0;
+pub(crate) const SCENE_BLOCK_BORDER_WIDTH: f32 = 1.0;
+pub(crate) const SCENE_CARET_STROKE_DEVICE_PIXELS: f64 = 1.0;
+
+pub(crate) const SCENE_PREVIEW_MAX_WIDTH: f32 = 480.0;
+pub(crate) const SCENE_PREVIEW_MAX_HEIGHT: f32 = 200.0;
+pub(crate) const SCENE_PREVIEW_FONT_SIZE: f32 = 12.0;
+pub(crate) const SCENE_PREVIEW_BORDER_WIDTH: f32 = 1.0;
+pub(crate) const SCENE_PREVIEW_CORNER_RADIUS: f32 = 8.0;
+pub(crate) const SCENE_PREVIEW_NOTCH_WIDTH: f32 = 14.0;
+pub(crate) const SCENE_PREVIEW_NOTCH_HEIGHT: f32 = 8.0;
+pub(crate) const SCENE_PREVIEW_NOTCH_CORNER_SAFE_INSET: f32 = 16.0;
+pub(crate) const SCENE_PREVIEW_HORIZONTAL_INSET: f32 = 12.0;
+pub(crate) const SCENE_PREVIEW_TOP_INSET: f32 = 10.0;
+pub(crate) const SCENE_PREVIEW_TITLE_BODY_GAP: f32 = 8.0;
+pub(crate) const SCENE_PREVIEW_BOTTOM_INSET: f32 = 10.0;

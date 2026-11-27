@@ -31,7 +31,7 @@ const fn descriptor(
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 89] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 91] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -269,6 +269,12 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 89] = [
     descriptor(CommandId::EditorDialogueAltAdd, "editor", "none; active collapsed Body Dialogue caret"),
     descriptor(CommandId::EditorDialogueAltDelete, "editor", "none; active collapsed Body Dialogue caret with multiple variants"),
     descriptor(CommandId::EditorDialogueAltNavigate, "editor", "direction: horizontal_direction (left=previous, right=next); active collapsed Body Dialogue caret with multiple variants"),
+    descriptor(CommandId::ViewOutlineEditorToggle, "view", "none; desktop-only global presentation/settings effect"),
+    descriptor(
+        CommandId::StoryMapBeatPlacementSet,
+        "story-map",
+        "card: stable card ID, lane_uuid: durable lane UUID, start_eighths: 0..=80000, length_eighths: 1..=80000",
+    ),
 ];
 
 pub fn descriptor_for(id: CommandId) -> Option<&'static CommandDescriptor> {

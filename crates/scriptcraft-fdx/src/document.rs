@@ -1,5 +1,5 @@
 use crate::text_state::TextState;
-use scriptcraft_model::{BeatPoint, Project, MAX_BOARD_DIMENSION};
+use scriptcraft_model::{BeatPoint, BoardFixed, Project, MAX_BOARD_DIMENSION};
 
 /// A Version 6 reader result. `project` owns the effective document page layout;
 /// its preservation state independently retains the original FDX source graph
@@ -24,6 +24,55 @@ pub struct FdxDocument {
     pub invisibles: InvisiblesState,
     /// Disposable Beat viewport, independent of Project and editing history.
     pub beat_board_view_state: BeatBoardViewState,
+    /// Disposable Story Map strip and horizontal timeline view, independent of Project.
+    pub story_map_view_state: StoryMapViewState,
+}
+
+/// Disposable Story Map height, unresolved/known viewport width, and timeline view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoryMapViewState {
+    height: u32,
+    width: Option<BoardFixed>,
+    scroll_origin: BoardFixed,
+    zoom_milli_percent: u32,
+}
+
+impl StoryMapViewState {
+    pub fn new(
+        height: u32,
+        width: Option<BoardFixed>,
+        scroll_origin: BoardFixed,
+        zoom_milli_percent: u32,
+    ) -> Option<Self> {
+        (height >= 90
+            && height <= 1_000_000
+            && width.is_none_or(|value| value.raw() > 0 && value <= MAX_BOARD_DIMENSION)
+            && scroll_origin.raw() >= 0
+            && scroll_origin <= MAX_BOARD_DIMENSION
+            && (1..=120_000_000).contains(&zoom_milli_percent))
+            .then_some(Self {
+                height,
+                width,
+                scroll_origin,
+                zoom_milli_percent,
+            })
+    }
+
+    pub const fn height(self) -> u32 { self.height }
+    pub const fn width(self) -> Option<BoardFixed> { self.width }
+    pub const fn scroll_origin(self) -> BoardFixed { self.scroll_origin }
+    pub const fn zoom_milli_percent(self) -> u32 { self.zoom_milli_percent }
+}
+
+impl Default for StoryMapViewState {
+    fn default() -> Self {
+        Self {
+            height: 90,
+            width: None,
+            scroll_origin: BoardFixed::from_milli_pixels(0),
+            zoom_milli_percent: 100_000,
+        }
+    }
 }
 
 /// Exact disposable Beat viewport coordinates and thousandths of a percent.

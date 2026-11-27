@@ -1,6 +1,7 @@
 //! Semantic, identity, budget, and retained-source verification for FDX output.
 
 use crate::diagnostics::{FdxError, SaveDiagnosticCode};
+use crate::context::{SaveContext, SaveOperation};
 use crate::reader::validate_xml_chars;
 use crate::writer::validate_qname;
 use crate::{
@@ -12,7 +13,7 @@ use scriptcraft_model::preservation::{
     BoardEntityKind, BoardGraph, DependencyConfidence, ForeignIdDomain, ForeignIdentity,
     PreservedNode, PreservedSection, ReferencePolicy, SourceAnchorId, SourceName, SourceOwnership,
 };
-use scriptcraft_model::{BeatBoard, BodyOwner, Project, TitlePageParagraph};
+use scriptcraft_model::{BeatBoard, BodyOwner, Project, StoryMap, TitlePageParagraph};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,8 +72,13 @@ pub(crate) fn same_unrelated_board_graph(
     current: &BoardGraph,
     old_board: &BeatBoard,
     new_board: &BeatBoard,
+    old_story_map: &StoryMap,
+    new_story_map: &StoryMap,
     removed_duplicates: &BTreeSet<ForeignIdentity>,
 ) -> bool {
+    if old_story_map.foreign_id.is_some() && old_story_map.foreign_id != new_story_map.foreign_id {
+        return false;
+    }
     let old_cards = beat_card_ids(old_board);
     let new_cards = beat_card_ids(new_board);
     let changing_cards = old_cards.symmetric_difference(&new_cards).cloned().collect::<BTreeSet<_>>();
@@ -84,8 +90,12 @@ pub(crate) fn same_unrelated_board_graph(
         }
     }
     changing_entities.extend(removed_duplicates.iter().cloned());
-    let entities = |graph: &BoardGraph| {
-        graph.entities.iter().filter(|entity| !changing_entities.contains(&entity.identity))
+    let generated_story_map = if old_story_map.foreign_id.is_none() {
+        new_story_map.foreign_id.as_deref()
+    } else { None };
+    let entities = |graph: &BoardGraph, current_side: bool| {
+        graph.entities.iter().filter(|entity| !changing_entities.contains(&entity.identity)
+                && !(current_side && generated_story_map == Some(entity.identity.value.as_str())))
             .map(|entity| {
                 let mut entity = entity.clone();
                 entity.source_order = 0;
@@ -104,7 +114,23 @@ pub(crate) fn same_unrelated_board_graph(
                     && deleted_cards.contains(&reference.target))
         }).cloned().collect::<Vec<_>>() 
     };
-    entities(original) == entities(current) && references(original) == references(current)
+    entities(original, false) == entities(current, true) && references(original) == references(current)
+}
+
+pub(crate) fn verify_story_map_board_graph(
+    story_map: &StoryMap,
+    graph: &BoardGraph,
+) -> Result<(), FdxError> {
+    let identity = ForeignIdentity {
+        domain: ForeignIdDomain::Board,
+        value: story_map.foreign_id.as_deref().filter(|id| !id.is_empty())
+            .ok_or_else(|| SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error())?.to_owned(),
+    };
+    let matches = graph.entities.iter().filter(|entity| entity.identity == identity).collect::<Vec<_>>();
+    if matches.len() != 1 || matches[0].kind != BoardEntityKind::DisplayBoard {
+        return Err(SaveDiagnosticCode::WriteOriginalIdentityGraphMismatch.error());
+    }
+    Ok(())
 }
 
 /// Check durable Beat owners against their actual graph domains, rather than
@@ -425,6 +451,7 @@ pub fn same_beat_board_projection(left: &Project, right: &Project) -> bool {
             left.foreign_id == right.foreign_id
                 && left.title == right.title
                 && left.rect == right.rect
+                && left.story_map_placement == right.story_map_placement
                 && left.paragraphs.len() == right.paragraphs.len()
                 && left.paragraphs.iter().zip(&right.paragraphs).all(|(left, right)| {
                     left.foreign_id == right.foreign_id
@@ -432,6 +459,22 @@ pub fn same_beat_board_projection(left: &Project, right: &Project) -> bool {
                         && left.runs == right.runs
                         && left.direct_settings == right.direct_settings
                 })
+        })
+}
+
+/// Compare durable Story Map values only. Disposable view values deliberately
+/// remain outside writer and session semantic equality.
+pub fn same_story_map_projection(left: &Project, right: &Project) -> bool {
+    let left = left.story_map();
+    let right = right.story_map();
+    left.foreign_id == right.foreign_id
+        && left.target_pages == right.target_pages
+        && left.lanes.len() == right.lanes.len()
+        && left.lanes.iter().zip(&right.lanes).all(|(left, right)| {
+            left.uuid == right.uuid
+                && left.label == right.label
+                && left.level == right.level
+                && left.lane_type == right.lane_type
         })
 }
 
@@ -477,6 +520,7 @@ pub(crate) fn same_writer_semantic_projection(left: &Project, right: &Project) -
         && same_semantic_elements(&left.elements, &right.elements)
         && same_dual_dialogue_projection(left, right)
         && same_beat_board_projection(left, right)
+        && same_story_map_projection(left, right)
         && same_script_notes_projection(left, right)
 }
 
@@ -492,13 +536,74 @@ pub(crate) fn verify_writer_semantic_projection(
 }
 
 
-pub(crate) fn validate_project_output_budgets(project: &Project) -> Result<(), FdxError> {
+pub(crate) fn validate_project_output_budgets(project: &Project, context: &SaveContext) -> Result<(), FdxError> {
     let mut text_bytes = 0usize;
     let mut payload_bytes = 0usize;
     let mut event_count = 3usize;
     // Account for the board and its generated containers, ListItems, Content,
     // and Item nodes as well as their title/identity attributes.
     event_count = event_count.checked_add(3).ok_or(FdxError::ResourceLimit)?;
+    // Bound the complete generated Story Map projection using the same source,
+    // event, name/value, and text ceilings as the established writer paths.
+    let story_map = project.story_map();
+    let target = story_map.target_pages.to_string();
+    event_count = event_count.checked_add(2).ok_or(FdxError::ResourceLimit)?;
+    // A missing first supported DisplayBoards container is generated with the
+    // Story Map board; account for it even when source-backed output reuses one.
+    event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+    text_bytes = text_bytes.checked_add(target.len()).ok_or(FdxError::ResourceLimit)?;
+    payload_bytes = payload_bytes.checked_add(target.len()).ok_or(FdxError::ResourceLimit)?;
+    let board_id = story_map.foreign_id.as_deref().ok_or(FdxError::AmbiguousIdentity)?;
+    let mut story_map_attributes = vec![("Type", "StoryMap".to_owned()), ("Id", board_id.to_owned())];
+    if context.operation() != SaveOperation::DirectSerialization {
+        let view = context.story_map_view_state();
+        story_map_attributes.push(("Height", view.height().to_string()));
+        if let Some(width) = view.width() {
+            story_map_attributes.push(("Width", crate::story_map_output::decimal_milli(width)));
+        }
+        story_map_attributes.push(("ScrollOrigin", format!("{},0", crate::story_map_output::decimal_milli(view.scroll_origin()))));
+        let zoom = view.zoom_milli_percent();
+        story_map_attributes.push(("ZoomLevel", format!("{}.{:03}", zoom / 1_000, zoom % 1_000)));
+    }
+    event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+    let mut account_attribute = |name: &str, value: &str| -> Result<(), FdxError> {
+        if name.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES || value.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES {
+            return Err(FdxError::ResourceLimit);
+        }
+        validate_xml_chars(name)?;
+        validate_xml_chars(value)?;
+        payload_bytes = payload_bytes.checked_add(name.len()).and_then(|bytes| bytes.checked_add(value.len()))
+            .ok_or(FdxError::ResourceLimit)?;
+        Ok(())
+    };
+    for (name, value) in story_map_attributes { account_attribute(name, &value)?; }
+    event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+    for lane in &story_map.lanes {
+        event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+        let level = lane.level.to_string();
+        for (name, value) in [
+            ("Id", lane.uuid.as_str()), ("Label", lane.label.as_str()),
+            ("Level", level.as_str()), ("Type", lane.lane_type.as_str()),
+        ] {
+            account_attribute(name, value)?;
+        }
+    }
+    for card in &project.beat_board().cards {
+        if let Some(placement) = &card.story_map_placement {
+            event_count = event_count.checked_add(1).ok_or(FdxError::ResourceLimit)?;
+            let lane_type = story_map.lanes.iter().find(|lane| lane.uuid == placement.lane_uuid)
+                .map(|lane| lane.lane_type.as_str()).ok_or(FdxError::InvalidValue)?;
+            for (name, value) in [
+                ("Type", "PageGoal".to_owned()), ("Order", "0".to_owned()),
+                ("Level", lane_type.to_owned()),
+                ("Number", crate::story_map_output::decimal_eighths(placement.start_eighths)),
+                ("Length", crate::story_map_output::decimal_eighths(placement.length_eighths)),
+            ] { account_attribute(name, &value)?; }
+        }
+    }
+    if text_bytes > MAX_SOURCE_TEXT_BYTES || payload_bytes > MAX_SOURCE_BYTES || event_count > MAX_SOURCE_EVENTS {
+        return Err(FdxError::ResourceLimit);
+    }
     let board = project.beat_board();
     if let Some(id) = &board.foreign_id {
         if id.len() > MAX_SOURCE_NAME_OR_VALUE_BYTES {

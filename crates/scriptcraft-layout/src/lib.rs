@@ -22,6 +22,7 @@ mod interaction;
 mod paginate;
 mod script_note;
 mod spans;
+mod story_map;
 mod title_page;
 mod wrap;
 
@@ -47,3 +48,7 @@ pub use inputs::{
 };
 pub use scriptcraft_model::layout_inputs::DocumentLeading;
 pub use interaction::InteractionQueryDiagnostics;
+pub use story_map::{
+    measure_scene_preview, project_story_map, SceneParagraphProjection, SceneProjection,
+    StoryMapPreviewLayout, StoryMapPreviewMetrics, StoryMapProjection, StoryMapProjectionError,
+};

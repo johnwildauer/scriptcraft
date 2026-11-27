@@ -8,7 +8,23 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::{BuiltinTemplateValue, EditorSurface, PointerPhase, BeatCardIdValue, BeatSelectionValue,
     BeatTextFieldValue, BeatTextPositionValue, BeatTextEditValue, BeatNavigationValue,
     ScriptNoteSelectionValue, ScriptNoteTextPositionValue, ScriptNoteFieldValue,
-    ScriptNoteTextOperationValue, ScriptNoteNavigationValue};
+    ScriptNoteTextOperationValue, ScriptNoteNavigationValue, StoryMapLaneIdValue,
+    StoryMapStartEighthsValue, StoryMapLengthEighthsValue};
+
+/// Converts the bounded wire request into the session's durable-identity request.
+pub fn story_map_placement_to_core(
+    card: &BeatCardIdValue,
+    lane_uuid: &StoryMapLaneIdValue,
+    start_eighths: StoryMapStartEighthsValue,
+    length_eighths: StoryMapLengthEighthsValue,
+) -> scriptcraft_session::editing::StoryMapPlacementRequest {
+    scriptcraft_session::editing::StoryMapPlacementRequest {
+        card: card.as_core().clone(),
+        lane_uuid: lane_uuid.as_str().to_owned(),
+        start_eighths: u64::from(start_eighths.get()),
+        length_eighths: u64::from(length_eighths.get()),
+    }
+}
 
 pub fn script_note_selection_to_core(
     value: &ScriptNoteSelectionValue,
