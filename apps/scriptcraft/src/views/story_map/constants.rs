@@ -23,7 +23,7 @@ pub(crate) const STORY_MAP_SCROLLBAR_HIT_EXPANSION: f32 = 3.0;
 pub(crate) const STORY_MAP_WHEEL_POINTS_PER_LINE: f64 = 24.0;
 pub(crate) const STORY_MAP_SCROLLBAR_HIDE_SECONDS: u64 = 1;
 pub(crate) const PROJECTION_QUIET_DELAY: std::time::Duration =
-    std::time::Duration::from_millis(250);
+    scriptcraft_model::cast_list::CAST_LIST_REFRESH_QUIET_DELAY;
 
 pub(crate) const RULER_WHOLE_PAGE_TICK_HEIGHT: f32 = 6.0;
 pub(crate) const RULER_EIGHTH_TICK_HEIGHT: f32 = 3.0;

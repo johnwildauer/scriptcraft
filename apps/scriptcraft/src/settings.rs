@@ -27,6 +27,7 @@ const DEFAULT_TOOLBAR_IDS: &[&str] = &[
     "title-page",
     "elements",
     "flexible-space",
+    "stats",
     "show-hide",
     "navigator",
     "flexible-space",
@@ -64,6 +65,7 @@ pub(crate) struct Settings {
     pub(crate) schema_version: u32,
     pub(crate) theme: ThemeChoice,
     pub(crate) template: String,
+    pub(crate) scroll_sensitivity: ScrollSensitivity,
     pub(crate) show_ruler: bool,
     pub(crate) show_story_map: bool,
     pub(crate) toolbar: Vec<String>,
@@ -76,6 +78,7 @@ impl Default for Settings {
             schema_version: SETTINGS_SCHEMA_VERSION,
             theme: ThemeChoice::System,
             template: DEFAULT_BUILTIN_TEMPLATE_ID.as_str().to_owned(),
+            scroll_sensitivity: ScrollSensitivity::default(),
             show_ruler: true,
             show_story_map: false,
             toolbar: default_toolbar_ids(),
@@ -83,6 +86,25 @@ impl Default for Settings {
         }
     }
 }
+
+/// Raw persisted global wheel sensitivity, kept as one transparent TOML number.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[serde(transparent)]
+pub(crate) struct ScrollSensitivity(f32);
+
+impl Default for ScrollSensitivity {
+    fn default() -> Self {
+        Self(2.0)
+    }
+}
+
+impl PartialEq for ScrollSensitivity {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for ScrollSensitivity {}
 
 /// Persisted appearance choice, kept separate from runtime presentation types.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -192,6 +214,16 @@ impl SettingsStore {
 
     pub(crate) fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Returns a usable multiplier without changing the raw persisted value.
+    pub(crate) fn scroll_sensitivity(&self) -> f32 {
+        let sensitivity = self.settings.scroll_sensitivity.0;
+        if sensitivity.is_finite() && sensitivity > 0.0 {
+            sensitivity
+        } else {
+            ScrollSensitivity::default().0
+        }
     }
 
     pub(crate) fn config_path(&self) -> Option<&Path> {

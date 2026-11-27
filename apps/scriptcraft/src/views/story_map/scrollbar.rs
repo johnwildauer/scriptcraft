@@ -142,9 +142,11 @@ pub(crate) fn handle(
     palette: EditorScrollbarPalette,
 ) -> bool {
     let ctx = ui.ctx();
-    let (pointer, pressed, released, down, escape, focused, gone, moved_inside) = ctx.input(|input| {
+    let (hover_pointer, interact_pointer, latest_pointer, pressed, released, down, escape, focused, gone, moved_inside) = ctx.input(|input| {
         (
+            input.pointer.hover_pos(),
             input.pointer.interact_pos(),
+            input.pointer.latest_pos(),
             input.pointer.primary_pressed(),
             input.pointer.primary_released(),
             input.pointer.primary_down(),
@@ -157,11 +159,16 @@ pub(crate) fn handle(
         )
     });
     let now = Instant::now();
-    let pointer = pointer.filter(|point| point.x.is_finite() && point.y.is_finite());
+    let finite = |point: Option<Pos2>| {
+        point.filter(|point| point.x.is_finite() && point.y.is_finite())
+    };
+    let hover_pointer = finite(hover_pointer);
+    let interact_pointer = finite(interact_pointer);
+    let capture_pointer = interact_pointer.or_else(|| finite(latest_pointer));
     let moved = !gone
         && moved_inside
-        && pointer.is_some_and(|position| state.last_pointer != Some(position));
-    if let Some(position) = pointer {
+        && hover_pointer.is_some_and(|position| state.last_pointer != Some(position));
+    if let Some(position) = capture_pointer.or(hover_pointer) {
         state.last_pointer = Some(position);
     }
     let thumb = thumb_geometry(geometry, track);
@@ -170,7 +177,7 @@ pub(crate) fn handle(
     }
     let pointer_on_active_bar = state.visible
         && !gone
-        && pointer.is_some_and(|position| {
+        && hover_pointer.is_some_and(|position| {
             track.expand(STORY_MAP_SCROLLBAR_HIT_EXPANSION).contains(position)
         });
     let deadline_active = state.hide_at.is_some_and(|deadline| now < deadline);
@@ -223,9 +230,9 @@ pub(crate) fn handle(
 
     if let Some(capture) = state.capture {
         let drag_position = if down {
-            pointer.or(state.last_pointer)
+            capture_pointer.or(state.last_pointer)
         } else {
-            pointer
+            capture_pointer
         };
         if let (Some(bar), Some(position)) = (thumb, drag_position) {
             let offset = (position.x - bar.track.left() - capture.grab_offset)
@@ -260,7 +267,7 @@ pub(crate) fn handle(
     let Some(bar) = thumb else {
         return false;
     };
-    let Some(position) = pointer else {
+    let Some(position) = hover_pointer else {
         return false;
     };
     let hit = bar
@@ -282,8 +289,16 @@ pub(crate) fn handle(
     {
         ctx.set_cursor_icon(egui::CursorIcon::Default);
     }
-    if pressed && hit {
-        let grab_offset = position.x - bar.thumb.left();
+    let track_hit = track
+        .expand(STORY_MAP_SCROLLBAR_HIT_EXPANSION)
+        .intersect(strip)
+        .contains(position);
+    if pressed && (hit || track_hit) {
+        let grab_offset = if hit {
+            position.x - bar.thumb.left()
+        } else {
+            bar.thumb.width() / 2.0
+        };
         state.capture = Some(Capture {
             grab_offset,
             track_left: bar.track.left(),
@@ -299,8 +314,17 @@ pub(crate) fn handle(
             zoom_percent: geometry.zoom_percent,
         });
         state.consumed_press = true;
-        if set_origin(view, geometry, geometry.origin) {
-            state.observe_view(ctx, *view);
+        if !hit {
+            let offset = (position.x - bar.track.left() - grab_offset).clamp(0.0, bar.travel);
+            let origin = if bar.travel > 0.0 {
+                f64::from(offset / bar.travel) * bar.max_origin
+            } else {
+                0.0
+            };
+            if set_origin(view, geometry, origin) {
+                state.observe_view(ctx, *view);
+                ctx.request_repaint();
+            }
         }
         ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
         return true;

@@ -93,6 +93,14 @@ fn cursor(mode: Mode) -> egui::CursorIcon {
 
 impl BeatInteraction {
     pub(crate) fn cancel(&mut self) { self.press = None; self.scrollbars = ScrollbarInteraction::default(); }
+    pub(crate) fn middle_scroll_eligible(&self, geometry: ViewportGeometry, pointer: Pos2) -> bool {
+        pointer.x.is_finite()
+            && pointer.y.is_finite()
+            && geometry.viewport.is_positive()
+            && geometry.clip.is_positive()
+            && geometry.clip.contains(pointer)
+            && !self.scrollbars.pointer_over_visible_hit_region(geometry, pointer)
+    }
     pub(crate) fn matches_external_generation(&self, generation: u64, token: u64) -> bool {
         self.press.as_ref().is_some_and(|press| {
             press.generation == Some(generation) && press.dragging && press.token == token

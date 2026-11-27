@@ -1,6 +1,6 @@
 use super::{cache::BeatLayoutCache, constants, geometry::{rect_visible, ViewportGeometry}, paint, pointer::BeatInteraction, text_state::BeatTextState};
 use crate::{chrome::theme::ScriptWorkspacePalette, presentation::document_font::PreparedDocumentFonts};
-use eframe::egui::{self, Pos2};
+use eframe::egui::{self, Pos2, Rect};
 use scriptcraft_fdx::BeatBoardViewState;
 use scriptcraft_layout::{BeatCardMetrics, LayoutEnvironment};
 use scriptcraft_model::BeatBoard;
@@ -9,7 +9,87 @@ use scriptcraft_commands::Command;
 use crate::views::beat_drag::{BeatDragCoordinator, BeatDragSource};
 use std::sync::Arc;
 
-pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardViewState, published: &mut Option<ViewportGeometry>, palette: ScriptWorkspacePalette, cache: &mut BeatLayoutCache, prepared: Option<(&LayoutEnvironment, &PreparedDocumentFonts)>, selection: &BeatSelection, token: u64, document_identity: Arc<()>, interaction: &mut BeatInteraction, text_state: &mut BeatTextState, coordinator: &mut BeatDragCoordinator, enabled: bool, card_delete_keyboard_enabled: bool) -> (bool, Vec<Command>) {
+#[derive(Default)]
+pub(crate) struct BeatAutoScrollState {
+    gesture: crate::presentation::auto_scroll::AutoScrollGesture,
+    signature: Option<BeatAutoScrollSignature>,
+}
+
+struct BeatAutoScrollSignature {
+    viewport: Rect,
+    clip: Rect,
+    board_width: i64,
+    board_height: i64,
+    zoom_milli_percent: u32,
+    document_identity: Arc<()>,
+}
+
+impl BeatAutoScrollSignature {
+    fn matches(&self, other: &Self) -> bool {
+        self.viewport == other.viewport
+            && self.clip == other.clip
+            && self.board_width == other.board_width
+            && self.board_height == other.board_height
+            && self.zoom_milli_percent == other.zoom_milli_percent
+            && Arc::ptr_eq(&self.document_identity, &other.document_identity)
+    }
+}
+
+impl BeatAutoScrollState {
+    pub(crate) fn reset(&mut self) {
+        self.gesture.reset();
+        self.signature = None;
+    }
+
+    pub(crate) fn cancel(&mut self) {
+        self.gesture.cancel();
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.gesture.is_active()
+    }
+
+    pub(crate) fn prepare(&mut self, geometry: ViewportGeometry, document_identity: &Arc<()>) -> bool {
+        if !usable_geometry(geometry) {
+            self.reset();
+            return false;
+        }
+        let next = BeatAutoScrollSignature {
+            viewport: geometry.viewport,
+            clip: geometry.clip,
+            board_width: geometry.board_width.raw(),
+            board_height: geometry.board_height.raw(),
+            zoom_milli_percent: geometry.view.zoom_milli_percent(),
+            document_identity: Arc::clone(document_identity),
+        };
+        if self.signature.as_ref().is_some_and(|current| !current.matches(&next)) {
+            self.reset();
+        }
+        self.signature = Some(next);
+        true
+    }
+}
+
+fn finite_rect(rect: Rect) -> bool {
+    rect.min.x.is_finite()
+        && rect.min.y.is_finite()
+        && rect.max.x.is_finite()
+        && rect.max.y.is_finite()
+        && rect.width().is_finite()
+        && rect.height().is_finite()
+}
+
+fn usable_geometry(geometry: ViewportGeometry) -> bool {
+    finite_rect(geometry.viewport)
+        && finite_rect(geometry.clip)
+        && geometry.viewport.is_positive()
+        && geometry.clip.is_positive()
+        && geometry.board_width.raw() > 0
+        && geometry.board_height.raw() > 0
+        && geometry.view.zoom_milli_percent() > 0
+}
+
+pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardViewState, published: &mut Option<ViewportGeometry>, palette: ScriptWorkspacePalette, cache: &mut BeatLayoutCache, prepared: Option<(&LayoutEnvironment, &PreparedDocumentFonts)>, selection: &BeatSelection, token: u64, document_identity: Arc<()>, interaction: &mut BeatInteraction, auto_scroll: &mut BeatAutoScrollState, text_state: &mut BeatTextState, coordinator: &mut BeatDragCoordinator, enabled: bool, card_delete_keyboard_enabled: bool) -> (bool, Vec<Command>, bool) {
     let mut success = true;
     cache.retain_board(board);
     let (rect, _) = ui.allocate_exact_size(ui.available_size().max(egui::Vec2::ZERO), egui::Sense::hover());
@@ -20,8 +100,30 @@ pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardVie
     let mut geometry = ViewportGeometry::new(rect, ui.clip_rect(), board, *view, pointer);
     let scrollbar_consumed = interaction.handle_scrollbars(ui, geometry, view, token, enabled, coordinator);
     geometry = geometry.with_view(*view);
-    let spatial_command = if scrollbar_consumed { None } else { interaction.input(ui, &response, geometry, board, selection, token, Arc::clone(&document_identity), enabled, coordinator) };
-    let preview = interaction.preview_card(board, geometry, ui.ctx().input(|i| i.pointer.interact_pos()));
+    if !enabled || coordinator.external_engaged() || !auto_scroll.prepare(geometry, &document_identity) {
+        auto_scroll.reset();
+    } else if scrollbar_consumed {
+        auto_scroll.cancel();
+    }
+    let gesture_frame = if enabled && !coordinator.external_engaged() && usable_geometry(geometry) {
+        auto_scroll.gesture.process_beat_frame(ui.ctx(), |point| {
+            interaction.middle_scroll_eligible(geometry, point)
+        })
+    } else {
+        auto_scroll.reset();
+        crate::presentation::auto_scroll::GestureFrame::default()
+    };
+    let gesture_owns_input = gesture_frame.active || gesture_frame.owned_input;
+    if gesture_frame.active && (gesture_frame.delta.x != 0.0 || gesture_frame.delta.y != 0.0) {
+        let origin = geometry.pan(-gesture_frame.delta);
+        if let Some(next_view) = BeatBoardViewState::new(origin, geometry.view.zoom_milli_percent()) {
+            *view = next_view;
+            geometry = geometry.with_view(next_view);
+            interaction.observe_view(ui.ctx(), next_view);
+        }
+    }
+    let spatial_command = if scrollbar_consumed || gesture_owns_input { None } else { interaction.input(ui, &response, geometry, board, selection, token, Arc::clone(&document_identity), enabled, coordinator) };
+    let preview = if gesture_owns_input { None } else { interaction.preview_card(board, geometry, ui.ctx().input(|i| i.pointer.interact_pos())) };
     *view = geometry.view;
     let mut commands = spatial_command.into_iter().collect::<Vec<_>>();
     if commands.iter().any(|command| matches!(command, Command::BeatBoardCardActivate { .. } | Command::BeatBoardCardGeometrySet { .. }
@@ -33,7 +135,7 @@ pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardVie
         if let Some(id) = text_state.viewport_id { ui.ctx().memory_mut(|memory| memory.surrender_focus(id)); }
         text_state.blur();
     }
-    if text_state.focused && !ui.ctx().memory(|memory| memory.has_focus(response.id)) {
+    if !gesture_owns_input && text_state.focused && !ui.ctx().memory(|memory| memory.has_focus(response.id)) {
         text_state.blur();
     }
     let (outside, backdrop, grid_color) = constants::colors(palette);
@@ -96,7 +198,7 @@ pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardVie
             }
         }
     }
-    if commands.is_empty() && enabled && !scrollbar_consumed && !coordinator.external_engaged() {
+    if !gesture_owns_input && commands.is_empty() && enabled && !scrollbar_consumed && !coordinator.external_engaged() {
         let selected_id = match selection { BeatSelection::Card { card } | BeatSelection::Text { card, .. } => Some(card), _ => None };
         if let (Some(card), Some((environment, fonts))) = (selected_id.and_then(|id| board.cards.iter().find(|card| &card.id == id)), prepared) {
             if let Ok(layouts) = cache.get_or_build(card, environment, fonts, BeatCardMetrics::default()) {
@@ -124,6 +226,15 @@ pub(crate) fn show(ui: &mut egui::Ui, board: &BeatBoard, view: &mut BeatBoardVie
         text_state.clear_field_view();
     }
     interaction.paint_scrollbars(ui, geometry, palette.editor_scrollbar);
+    if gesture_frame.active {
+        crate::presentation::auto_scroll::paint_anchor(
+            ui.painter(),
+            geometry.clip,
+            auto_scroll.gesture.anchor(),
+            palette.page.subdued_text,
+        );
+    }
+    crate::presentation::auto_scroll::set_active_cursor(ui.ctx(), gesture_frame.active);
     *published = Some(geometry);
-    (success, commands)
+    (success, commands, gesture_owns_input)
 }

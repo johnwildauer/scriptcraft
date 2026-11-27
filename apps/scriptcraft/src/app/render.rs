@@ -46,7 +46,7 @@ impl ScriptCraftApp {
             && !menu_popup_blocked && !sprint_popup_blocked
             && crate::chrome::shortcuts::shortcut_input_allowed(self.ime_active, ime_event_in_frame);
         let document_identity = self.session.project().layout_identity().clone();
-        let (success, command) = crate::views::beat_board::show(
+        let (success, command, beat_auto_scroll_owns_input) = crate::views::beat_board::show(
             ui,
             self.session.project().beat_board(),
             &mut self.beat_board_view_state,
@@ -58,6 +58,7 @@ impl ScriptCraftApp {
             self.session.mutation_token(),
             document_identity,
             &mut self.beat_interaction,
+            &mut self.beat_auto_scroll,
             &mut self.beat_text,
             &mut self.beat_drag_coordinator,
             available,
@@ -66,7 +67,7 @@ impl ScriptCraftApp {
         for command in command {
             self.dispatch_command(crate::commands::CommandInvocation::new(command, scriptcraft_commands::CommandOrigin::Pointer), ui.ctx());
         }
-        if self.beat_text.focused {
+        if !beat_auto_scroll_owns_input && self.beat_text.focused {
             match self.session.beat_selection() {
                 scriptcraft_session::editing::BeatSelection::Text { card, field, .. } => {
                     let changed_target = self.beat_text.field.as_ref().is_none_or(|(old_card, old_field)| old_card != card || old_field != field);

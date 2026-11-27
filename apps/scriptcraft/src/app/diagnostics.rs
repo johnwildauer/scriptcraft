@@ -5,7 +5,7 @@ use crate::views::script::RevealIntent;
 use eframe::egui;
 use scriptcraft_commands::{Command, EditorSurface};
 use scriptcraft_fdx as fdx;
-use scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL;
+use scriptcraft_model::cast_list::CAST_LIST_REFRESH_QUIET_DELAY;
 use scriptcraft_session::editing::EditError;
 use std::ops::{Deref, DerefMut};
 use std::time::{Duration, Instant};
@@ -384,22 +384,41 @@ impl ScriptCraftApp {
         }
     }
 
+    pub(crate) fn synchronize_cast_list_scheduler(&mut self, now: Instant) {
+        let pending = self.session.pending_derived_work_summary();
+        self.observed_cast_list_mutation_token = self.session.mutation_token();
+        self.next_cast_list_refresh = if pending.retryable {
+            Some(if pending.complete {
+                now
+            } else {
+                now.checked_add(CAST_LIST_REFRESH_QUIET_DELAY)
+                    .unwrap_or(now)
+            })
+        } else {
+            None
+        };
+    }
+
     pub(crate) fn refresh_cast_lists_on_schedule(&mut self, ctx: &egui::Context, now: Instant) {
         let started = Instant::now();
-        if now < self.next_cast_list_refresh {
-            self.performance.derived_refresh_skipped =
-                self.performance.derived_refresh_skipped.saturating_add(1);
-            self.performance.derived_refresh_nanos = self
-                .performance
-                .derived_refresh_nanos
-                .saturating_add(started.elapsed().as_nanos());
-            ctx.request_repaint_after(self.next_cast_list_refresh.saturating_duration_since(now));
-            return;
+        let pending = self.session.pending_derived_work_summary();
+        let mutation_token = self.session.mutation_token();
+        if mutation_token != self.observed_cast_list_mutation_token {
+            self.observed_cast_list_mutation_token = mutation_token;
+            self.next_cast_list_refresh = if pending.retryable {
+                Some(if pending.complete {
+                    now
+                } else {
+                    now.checked_add(CAST_LIST_REFRESH_QUIET_DELAY)
+                        .unwrap_or(now)
+                })
+            } else {
+                None
+            };
         }
 
-        let pending = self.session.pending_derived_work_summary();
         if !pending.retryable {
-            self.next_cast_list_refresh = now + CAST_LIST_REFRESH_INTERVAL;
+            self.next_cast_list_refresh = None;
             self.performance.derived_refresh_skipped =
                 self.performance.derived_refresh_skipped.saturating_add(1);
             if !pending.pending {
@@ -412,14 +431,34 @@ impl ScriptCraftApp {
                 .performance
                 .derived_refresh_nanos
                 .saturating_add(started.elapsed().as_nanos());
+            return;
+        }
+
+        if self.next_cast_list_refresh.is_none() {
+            self.next_cast_list_refresh = Some(if pending.complete {
+                now
+            } else {
+                now.checked_add(CAST_LIST_REFRESH_QUIET_DELAY)
+                    .unwrap_or(now)
+            });
+        }
+        let deadline = self.next_cast_list_refresh.unwrap_or(now);
+        if now < deadline {
+            self.performance.derived_refresh_skipped =
+                self.performance.derived_refresh_skipped.saturating_add(1);
+            self.performance.derived_refresh_nanos = self
+                .performance
+                .derived_refresh_nanos
+                .saturating_add(started.elapsed().as_nanos());
+            let remaining = deadline.saturating_duration_since(now);
             self.performance.repaint_requests = self.performance.repaint_requests.saturating_add(1);
-            ctx.request_repaint_after(CAST_LIST_REFRESH_INTERVAL);
+            ctx.request_repaint_after(remaining);
             return;
         }
 
         self.performance.derived_refresh_attempts =
             self.performance.derived_refresh_attempts.saturating_add(1);
-        self.next_cast_list_refresh = now + CAST_LIST_REFRESH_INTERVAL;
+        self.next_cast_list_refresh = None;
         match self.session.refresh_cast_lists_with_outcome() {
             Ok(outcome) => {
                 self.performance.derived_refresh_completed =
@@ -481,8 +520,6 @@ impl ScriptCraftApp {
             .performance
             .derived_refresh_nanos
             .saturating_add(started.elapsed().as_nanos());
-        self.performance.repaint_requests = self.performance.repaint_requests.saturating_add(1);
-        ctx.request_repaint_after(CAST_LIST_REFRESH_INTERVAL);
     }
 
     pub(crate) fn record_native_event(&mut self, category: &'static str) {

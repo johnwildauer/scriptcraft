@@ -3,7 +3,7 @@
 use crate::preservation::PreservationError;
 use crate::scene_metadata::{
     derived_character_projection, has_capability, reconcile_project_candidate_with_scope,
-    scene_arc_names, SceneMetadataError,
+    SceneMetadataError,
 };
 use crate::{
     body_offsets::{flat_document_len, paragraph_flat_start},
@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The desktop refresh cadence for derived scene cast lists.
-pub const CAST_LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// Quiet period before retryable scene-scoped derived refresh work runs.
+pub const CAST_LIST_REFRESH_QUIET_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CastListError {
@@ -151,14 +151,9 @@ fn correct_cast_lists_candidate(
             scene_start = is_heading.then_some(index);
         }
     }
-    let reconciliation_scope = scope
-        .difference(&source_deferred_scenes)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let reconciliation =
-        reconcile_project_candidate_with_scope(candidate, Some(&reconciliation_scope))
-            .map_err(CastListError::SceneMetadata)?;
-    let mut deferred_scenes = source_deferred_scenes;
+    let reconciliation = reconcile_project_candidate_with_scope(candidate, Some(&scope))
+        .map_err(CastListError::SceneMetadata)?;
+    let mut deferred_scenes = source_deferred_scenes.clone();
     deferred_scenes.extend(reconciliation.deferred_scenes.iter().cloned());
     deferred_scenes.extend(scope.difference(&all_scenes).cloned());
     let mut changed = reconciliation.changed;
@@ -179,25 +174,17 @@ fn correct_cast_lists_candidate(
                 let heading_id = &candidate.elements[start].id;
                 if scope.contains(heading_id.as_str()) {
                     attempted_scenes.insert(heading_id.as_str().to_owned());
-                    if deferred_scenes.contains(heading_id.as_str()) {
-                        scene_start = is_heading.then_some(index);
-                        continue;
-                    }
                 }
                 if scope.contains(heading_id.as_str())
+                    && !source_deferred_scenes.contains(heading_id.as_str())
                     && scene.iter().any(|element| {
                         has_capability(candidate, element, |capabilities| capabilities.cast_list)
                     })
                 {
-                    let names = if candidate.preservation.is_some() {
-                        scene_arc_names(candidate, heading_id)
-                            .map_err(CastListError::SceneMetadata)?
-                    } else {
-                        derived_character_projection(candidate, scene)
-                            .into_iter()
-                            .map(|(_, name)| name)
-                            .collect()
-                    };
+                    let names = derived_character_projection(candidate, scene)
+                        .into_iter()
+                        .map(|(_, name)| name)
+                        .collect::<Vec<_>>();
                     let cast = scene_cast_text(&names)?;
                     for element_index in start + 1..index {
                         if has_capability(

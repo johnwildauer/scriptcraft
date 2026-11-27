@@ -353,6 +353,7 @@ impl ScriptCraftApp {
                 &mut self.story_map_navigation.scrollbars,
                 &mut self.story_map_navigation.auto_scroll,
                 palette,
+                self.settings_store.scroll_sensitivity(),
             );
             if let Some((mut timeline, _, navigation_consumed, manual_navigation)) = shared_timeline {
                 let interaction_rect = geometry.rect.intersect(ui.clip_rect());

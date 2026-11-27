@@ -122,14 +122,21 @@ fn slider_rect(strip: &StripGeometry) -> Option<Rect> {
     ))
 }
 
-fn wheel_points(unit: egui::MouseWheelUnit, delta: egui::Vec2, page_width: f64) -> Option<f64> {
+fn wheel_points(
+    unit: egui::MouseWheelUnit,
+    delta: egui::Vec2,
+    page_width: f64,
+    scroll_sensitivity: f32,
+) -> Option<f64> {
     let raw = if delta.x != 0.0 { delta.x } else { delta.y };
     if !raw.is_finite() || raw == 0.0 {
         return None;
     }
     let multiplier = match unit {
         egui::MouseWheelUnit::Point => 1.0,
-        egui::MouseWheelUnit::Line => STORY_MAP_WHEEL_POINTS_PER_LINE,
+        egui::MouseWheelUnit::Line => {
+            STORY_MAP_WHEEL_POINTS_PER_LINE * f64::from(scroll_sensitivity)
+        }
         egui::MouseWheelUnit::Page => page_width,
     };
     let points = f64::from(raw) * multiplier;
@@ -143,6 +150,7 @@ fn handle_wheel(
     view: &mut StoryMapViewState,
     scrollbars: &mut StoryMapScrollbarState,
     auto_scroll: &mut AutoScrollGesture,
+    scroll_sensitivity: f32,
 ) -> (TimelineGeometry, bool) {
     let ctx = ui.ctx();
     let pointer = ctx.input(|input| input.pointer.interact_pos());
@@ -157,7 +165,12 @@ fn handle_wheel(
     let mut consumed = false;
     for event in events {
         if let egui::Event::MouseWheel { unit, delta, .. } = event {
-            let Some(points) = wheel_points(unit, delta, geometry.viewport_width) else {
+            let Some(points) = wheel_points(
+                unit,
+                delta,
+                geometry.viewport_width,
+                scroll_sensitivity,
+            ) else {
                 continue;
             };
             let Some(candidate) = next.with_origin(next.origin - points) else {
@@ -304,6 +317,7 @@ pub(crate) fn compose_navigation(
     scrollbars: &mut StoryMapScrollbarState,
     auto_scroll: &mut AutoScrollGesture,
     palette: ApplicationPalette,
+    scroll_sensitivity: f32,
 ) -> Option<(TimelineGeometry, Rect, bool, bool)> {
     let slider = slider_rect(strip)?;
     let mut timeline = derive_and_clamp(
@@ -323,6 +337,7 @@ pub(crate) fn compose_navigation(
         view,
         scrollbars,
         auto_scroll,
+        scroll_sensitivity,
     );
     timeline = after_wheel;
     let (after_slider, _, slider_changed) = handle_slider(

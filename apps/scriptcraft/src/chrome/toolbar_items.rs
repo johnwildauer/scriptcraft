@@ -5,9 +5,9 @@ use egui_material_icons::{
         ICON_ARTICLE, ICON_BOOK_5, ICON_CANCEL, ICON_DASHBOARD, ICON_DOUBLE_ARROW, ICON_DRAFT,
         ICON_FILE_OPEN, ICON_FORMAT_ALIGN_LEFT, ICON_FORMAT_BOLD, ICON_FORMAT_ITALIC,
         ICON_FORMAT_STRIKETHROUGH, ICON_FORMAT_UNDERLINED, ICON_GRID_VIEW,
-        ICON_KEYBOARD_ARROW_DOWN, ICON_NOTES, ICON_PICTURE_AS_PDF, ICON_SAVE, ICON_SAVE_AS,
-        ICON_TABLE, ICON_TEXT_FIELDS, ICON_UPLOAD_FILE, ICON_VIEW_LIST, ICON_VISIBILITY,
-        ICON_WEB_ASSET,
+        ICON_KEYBOARD_ARROW_DOWN, ICON_LEADERBOARD, ICON_NOTES, ICON_PICTURE_AS_PDF, ICON_SAVE,
+        ICON_SAVE_AS, ICON_TABLE, ICON_TEXT_FIELDS, ICON_UPLOAD_FILE, ICON_VIEW_LIST,
+        ICON_VISIBILITY, ICON_WEB_ASSET,
     },
     MaterialIcon,
 };
@@ -276,7 +276,11 @@ const fn script_view_item(choice: ViewsChoiceSpec) -> ToolbarItemSpec {
 }
 
 const SCRIPT_NORMAL_ITEM: ToolbarItemSpec = script_view_item(VIEWS_CHOICES[0]);
-const SCRIPT_PAGE_ITEM: ToolbarItemSpec = script_view_item(VIEWS_CHOICES[1]);
+const SCRIPT_PAGE_ITEM: ToolbarItemSpec = ToolbarItemSpec {
+    label: "Page View",
+    accessibility_name: "Page View",
+    ..script_view_item(VIEWS_CHOICES[1])
+};
 const SCRIPT_SPEED_ITEM: ToolbarItemSpec = script_view_item(VIEWS_CHOICES[2]);
 
 /// Immutable effective toolbar composition resolved from the raw settings snapshot.
@@ -494,6 +498,17 @@ const EXPORT_TEXT_ITEM: ToolbarItemSpec = ToolbarItemSpec {
     layout: ToolbarLayoutPolicy::Measured,
     presentation: ItemPresentationOverrides::NONE,
 };
+const STATS_ITEM: ToolbarItemSpec = ToolbarItemSpec {
+    id: "stats",
+    label: "Stats",
+    accessibility_name: "Stats",
+    caption_visible: true,
+    graphic: ToolbarGraphic::Icon(IconSpec::new(ICON_LEADERBOARD)),
+    behavior: ToolbarBehavior::None,
+    enablement: EnablementPolicy::Disabled,
+    layout: ToolbarLayoutPolicy::Measured,
+    presentation: ItemPresentationOverrides::NONE,
+};
 const NAVIGATOR_ITEM: ToolbarItemSpec = ToolbarItemSpec {
     id: "navigator",
     label: "Navigator",
@@ -512,7 +527,7 @@ const EXPORT_PDF_ITEM: ToolbarItemSpec = action(
     CommandId::FileSaveAsPdf,
 );
 
-const BUILTIN_TOOLBAR_ITEM_CATALOG: [ToolbarItemSpec; 21] = [
+const BUILTIN_TOOLBAR_ITEM_CATALOG: [ToolbarItemSpec; 22] = [
     FLEXIBLE_SPACE_ITEM,
     SPACE_ITEM_SPEC,
     NEW_ITEM,
@@ -526,6 +541,7 @@ const BUILTIN_TOOLBAR_ITEM_CATALOG: [ToolbarItemSpec; 21] = [
     BEAT_BOARD_ITEM,
     TITLE_PAGE_ITEM,
     ELEMENTS_ITEM,
+    STATS_ITEM,
     SHOW_HIDE_ITEM,
     NAVIGATOR_ITEM,
     EXPORT_TEXT_ITEM,

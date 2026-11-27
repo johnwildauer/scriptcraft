@@ -49,6 +49,7 @@ pub(crate) struct GestureFrame {
 pub(crate) enum AutoScrollOwner {
     Outline,
     Body,
+    Beat,
 }
 
 const ROUTE_OWNER_ID: &str = "middle-auto-scroll-route-owner";
@@ -57,6 +58,7 @@ const ROUTE_OWNER_ID: &str = "middle-auto-scroll-route-owner";
 struct RouteOwners {
     outline: bool,
     body: bool,
+    beat: bool,
 }
 
 pub(crate) fn set_route_owner(ctx: &egui::Context, owner: Option<AutoScrollOwner>) {
@@ -70,6 +72,7 @@ pub(crate) fn set_route_owner(ctx: &egui::Context, owner: Option<AutoScrollOwner
         match owner {
             Some(AutoScrollOwner::Outline) => owners.outline = true,
             Some(AutoScrollOwner::Body) => owners.body = true,
+            Some(AutoScrollOwner::Beat) => owners.beat = true,
             None => {}
         }
         data.insert_temp(id, owners);
@@ -82,8 +85,9 @@ fn other_route_owns(ctx: &egui::Context, owner: AutoScrollOwner) -> bool {
             .get_temp::<RouteOwners>(egui::Id::new(ROUTE_OWNER_ID))
             .unwrap_or_default();
         match owner {
-            AutoScrollOwner::Outline => owners.body && !owners.outline,
-            AutoScrollOwner::Body => owners.outline && !owners.body,
+            AutoScrollOwner::Outline => (owners.body || owners.beat) && !owners.outline,
+            AutoScrollOwner::Body => (owners.outline || owners.beat) && !owners.body,
+            AutoScrollOwner::Beat => (owners.outline || owners.body) && !owners.beat,
         }
     })
 }
@@ -129,6 +133,14 @@ impl AutoScrollGesture {
         eligible: impl Fn(Pos2) -> bool,
     ) -> GestureFrame {
         self.process_frame_for_owner(ctx, AutoScrollOwner::Body, eligible)
+    }
+
+    pub(crate) fn process_beat_frame(
+        &mut self,
+        ctx: &egui::Context,
+        eligible: impl Fn(Pos2) -> bool,
+    ) -> GestureFrame {
+        self.process_frame_for_owner(ctx, AutoScrollOwner::Beat, eligible)
     }
 
     fn process_frame_for_owner(

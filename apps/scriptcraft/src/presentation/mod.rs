@@ -14,3 +14,4 @@ pub(crate) mod span_paint;
 pub(crate) mod style;
 pub(crate) mod wheel_zoom;
 pub(crate) mod auto_scroll;
+pub(crate) mod wheel_scroll;

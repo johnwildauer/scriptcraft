@@ -8,7 +8,6 @@ use eframe::egui;
 use scriptcraft_commands::{Command, CommandOrigin, DocumentPath};
 use scriptcraft_fdx as fdx;
 use scriptcraft_layout::LayoutCache;
-use scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL;
 use scriptcraft_session::storage::{
     self as fdx_storage, FdxBaseline, FdxSaveMode, FdxSaveTarget, StdFdxStorageFileSystem,
 };
@@ -216,7 +215,7 @@ impl ScriptCraftApp {
                 // Save preflight always prepares and publishes complete derived
                 // data. The session's pending-work state, not a revision marker,
                 // keeps the timer from repeating that work.
-                self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
+                self.synchronize_cast_list_scheduler(Instant::now());
                 self.invalidate_after_save_rebase();
                 if outcome.temporary_cleanup_warning {
                     self.show_error(

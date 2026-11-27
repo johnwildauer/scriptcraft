@@ -12,7 +12,6 @@ use eframe::egui::{self, Vec2};
 use scriptcraft_commands::{Command, CommandOrigin, DocumentPath, EditorSurface, ImportResolution};
 use scriptcraft_fdx::{self as fdx, FdxImportOutcome, FdxMigrationConsent, FdxVersionStatus};
 use scriptcraft_layout::LayoutCache;
-use scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL;
 use scriptcraft_model::Project;
 use scriptcraft_session::editing::{EditingSession, Position, Selection};
 use scriptcraft_session::storage::{
@@ -647,6 +646,7 @@ impl ScriptCraftApp {
         self.surface_focused = false;
         self.session = replacement;
         self.reset_body_auto_scroll();
+        self.beat_auto_scroll.reset();
         self.script_note_workspace.reset_document_activation();
         self.script_view_mode = script_view_mode;
         self.invisibles = invisibles;
@@ -689,7 +689,7 @@ impl ScriptCraftApp {
         }
         self.pending_window_restore = window_state;
         self.pending_fdx_open = None;
-        self.next_cast_list_refresh = Instant::now() + CAST_LIST_REFRESH_INTERVAL;
+        self.synchronize_cast_list_scheduler(Instant::now());
         self.page_geometry.reset_for_document_replacement();
         self.title_view
             .page_geometry

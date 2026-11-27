@@ -17,4 +17,4 @@ pub(crate) use cache::BeatLayoutCache;
 pub(crate) use pointer::BeatInteraction;
 pub(crate) use text_state::BeatTextState;
 pub(crate) use constants::WHEEL_POINTS_PER_LINE;
-pub(crate) use viewport::show;
+pub(crate) use viewport::{show, BeatAutoScrollState};

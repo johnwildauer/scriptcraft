@@ -685,6 +685,35 @@ impl eframe::App for ScriptCraftApp {
                 adapter.adapt_events(&mut raw_input.events, viewport_height_points)
             }
         };
+        if root_viewport
+            && !title_page_viewport
+            && self.root_document_view == RootDocumentView::Script
+        {
+            let mut pointer = ctx.input(|input| input.pointer.latest_pos());
+            for event in &mut raw_input.events {
+                match event {
+                    egui::Event::PointerMoved(position)
+                    | egui::Event::PointerButton { pos: position, .. } => {
+                        pointer = (position.x.is_finite() && position.y.is_finite())
+                            .then_some(*position);
+                    }
+                    egui::Event::PointerGone => pointer = None,
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Line,
+                        delta,
+                        ..
+                    } if self.body_auto_scroll_contains_route(ctx, pointer) => {
+                        if let Some(scaled) = crate::presentation::wheel_scroll::scale_line_delta(
+                            *delta,
+                            self.settings_store.scroll_sensitivity(),
+                        ) {
+                            *delta = scaled;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         let surface = if title_page_viewport {
             Some(EditorSurface::TitlePage)
         } else if independent_dialog_viewport {
@@ -925,31 +954,58 @@ impl ScriptCraftApp {
     /// smooth scrolling and before queued Save commands capture view state.
     fn handle_beat_navigation_input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput, closing: bool) {
         let availability = self.app_command_availability();
+        let focused = raw.viewports.get(&raw.viewport_id).is_none_or(|viewport| viewport.focused != Some(false))
+            && !raw.events.iter().any(|event| matches!(event, egui::Event::WindowFocused(false)));
+        let menu_popup_blocked = self.menu_policy.in_window_shortcuts_owned()
+            && menu::in_window_menu_popup_open(ctx);
         let blocked = closing || self.element_windows.owns_input()
-            || raw.viewports.get(&raw.viewport_id).is_some_and(|viewport| viewport.focused == Some(false))
+            || !focused
             || availability.replacement_pending || availability.modal_blocked
             || availability.native_output_active
             || availability.story_map_target_dialog_open
             || availability.story_map_context_menu_open
-            || (self.menu_policy.in_window_shortcuts_owned() && menu::in_window_menu_popup_open(ctx));
+            || menu_popup_blocked
+            || self.beat_drag_coordinator.external_engaged();
         if blocked {
             self.wheel_zoom.reset();
+            self.beat_auto_scroll.reset();
             return;
+        }
+        let document_identity = self.session.project().layout_identity().clone();
+        let geometry_usable = self.beat_viewport.is_some_and(|geometry| {
+            self.beat_auto_scroll.prepare(geometry, &document_identity)
+        });
+        if !geometry_usable {
+            self.beat_auto_scroll.reset();
+        }
+        let available = availability.is_enabled(CommandId::BeatBoardSelectionSet);
+        if !available {
+            self.beat_auto_scroll.reset();
         }
         let mut pointer = self.beat_viewport.and_then(|geometry| geometry.pointer_screen);
         let mut retained = Vec::with_capacity(raw.events.len());
         for event in std::mem::take(&mut raw.events) {
             match &event {
-                egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => pointer = Some(*pos),
+                egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => {
+                    pointer = (pos.x.is_finite() && pos.y.is_finite()).then_some(*pos);
+                }
                 egui::Event::PointerGone | egui::Event::WindowFocused(false) => {
                     pointer = None;
                     self.wheel_zoom.reset();
+                    if matches!(&event, egui::Event::WindowFocused(false)) {
+                        self.beat_auto_scroll.reset();
+                    }
                 }
                 _ => {}
             }
             self.beat_viewport = self.beat_viewport.map(|geometry| geometry.with_pointer(pointer));
+            let over_sprint_popup = self.sprint_timer.popup_open
+                && pointer.is_some_and(|pos| self.sprint_timer.popup_rect.contains(pos));
             let inside = self.beat_viewport.is_some_and(|geometry| pointer.is_some_and(|pos|
-                geometry.clip.contains(pos) && !(self.sprint_timer.popup_open && self.sprint_timer.popup_rect.contains(pos))));
+                geometry.clip.contains(pos) && !over_sprint_popup));
+            if matches!(&event, egui::Event::MouseWheel { .. } | egui::Event::Zoom(_)) && inside {
+                self.beat_auto_scroll.cancel();
+            }
             let owns_pinch = self.beat_viewport.is_some() && (inside || pointer.is_none());
             if let egui::Event::Zoom(factor) = &event {
                 if owns_pinch {
@@ -961,17 +1017,62 @@ impl ScriptCraftApp {
                     continue;
                 }
             }
-            if !inside {
+            let active_middle_press = self.beat_auto_scroll.is_active()
+                && matches!(&event, egui::Event::PointerButton {
+                    button: egui::PointerButton::Middle,
+                    pressed: true,
+                    ..
+                });
+            if over_sprint_popup {
+                self.beat_auto_scroll.reset();
+                self.wheel_zoom.reset();
+                retained.push(event);
+                continue;
+            }
+            if !inside && !active_middle_press {
                 self.wheel_zoom.reset();
                 retained.push(event);
                 continue;
             }
             let viewport_size = self.beat_viewport.map(|geometry| geometry.viewport.size()).unwrap_or(egui::Vec2::ZERO);
             let mut single = vec![event];
-            let factors = self.wheel_zoom.adapt_events(&mut single, viewport_size.y);
+            let factors = self.wheel_zoom.adapt_events_filtered(
+                &mut single,
+                viewport_size.y,
+                |position| {
+                    let active_exit = self.beat_auto_scroll.is_active();
+                    let point = position.or(pointer);
+                    let timer_popup = self.sprint_timer.popup_open
+                        && point.is_some_and(|point| self.sprint_timer.popup_rect.contains(point));
+                    let eligible = !timer_popup && (active_exit
+                        || (available && !menu_popup_blocked
+                            && !self.beat_drag_coordinator.external_engaged()
+                            && self.beat_viewport.zip(point).is_some_and(|(geometry, point)| {
+                                self.beat_interaction.middle_scroll_eligible(geometry, point)
+                            })));
+                    if eligible {
+                        auto_scroll::set_route_owner(ctx, Some(AutoScrollOwner::Beat));
+                        Some(AutoScrollOwner::Beat)
+                    } else {
+                        None
+                    }
+                },
+            );
             self.dispatch_wheel_zoom_factors(EditorSurface::Body, ctx, factors);
             for event in single {
                 if let egui::Event::MouseWheel { unit, delta, modifiers, .. } = &event {
+                    let delta = if *unit == egui::MouseWheelUnit::Line {
+                        let Some(scaled) = crate::presentation::wheel_scroll::scale_line_delta(
+                            *delta,
+                            self.settings_store.scroll_sensitivity(),
+                        ) else {
+                            // Consume rejected Line input rather than forwarding an invalid delta.
+                            continue;
+                        };
+                        scaled
+                    } else {
+                        *delta
+                    };
                     let multiplier = match unit {
                         egui::MouseWheelUnit::Point => egui::Vec2::splat(1.0),
                         egui::MouseWheelUnit::Line => egui::Vec2::splat(crate::views::beat_board::WHEEL_POINTS_PER_LINE),

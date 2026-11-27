@@ -10,7 +10,6 @@ use crate::documents::{
 use eframe::egui;
 use scriptcraft_commands::EditorSurface;
 use scriptcraft_fdx::BuiltinTemplateId;
-use scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL;
 use std::ffi::OsString;
 use std::path::Path;
 use std::time::Instant;
@@ -341,8 +340,7 @@ impl ScriptCraftApp {
                 self.pending_replacement = None;
                 let (title, message) = replacement_resume_feedback(reason);
                 show_native_lifecycle_error(title, message);
-                self.next_cast_list_refresh =
-                    now.checked_add(CAST_LIST_REFRESH_INTERVAL).unwrap_or(now);
+                self.synchronize_cast_list_scheduler(now);
                 let availability = self.app_command_availability();
                 let prior_surface = self.replacement_resume_surface.take();
                 let resume_surface =

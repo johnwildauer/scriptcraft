@@ -74,6 +74,21 @@ impl ScrollbarInteraction {
         }
         self.last_view = Some(current);
     }
+
+    pub(crate) fn pointer_over_visible_hit_region(
+        &self,
+        geometry: ViewportGeometry,
+        pointer: Pos2,
+    ) -> bool {
+        if !self.visible || !pointer.x.is_finite() || !pointer.y.is_finite() {
+            return false;
+        }
+        let layout = geometry_for(geometry);
+        [layout.horizontal, layout.vertical]
+            .into_iter()
+            .flatten()
+            .any(|bar| pointer_in(bar, geometry.viewport, pointer))
+    }
 }
 
 fn finite_extent(value: f32) -> f64 {

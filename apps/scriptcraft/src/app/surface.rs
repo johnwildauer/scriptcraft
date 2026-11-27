@@ -28,6 +28,7 @@ impl ScriptCraftApp {
 
     pub(crate) fn set_beat_zoom(&mut self, zoom: f64, pointer_anchor: bool, ctx: &egui::Context) {
         if !zoom.is_finite() || zoom <= 0.0 { return; }
+        self.beat_auto_scroll.cancel();
         let milli = (zoom * 1000.0).round().clamp(5000.0, 300000.0) as u32;
         self.beat_pinch_zoom_percent = zoom;
         if milli != self.beat_board_view_state.zoom_milli_percent() {
@@ -57,6 +58,7 @@ impl ScriptCraftApp {
         crate::presentation::auto_scroll::set_route_owner(ctx, None);
         self.root_document_view = view;
         self.beat_viewport = None;
+        self.beat_auto_scroll.reset();
         self.beat_interaction.cancel();
         self.beat_text.blur();
         if let Some(id) = self.editor_surface_id {

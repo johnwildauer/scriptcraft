@@ -105,6 +105,7 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) root_document_view: RootDocumentView,
     pub(crate) beat_pinch_zoom_percent: f64,
     pub(crate) beat_viewport: Option<crate::views::beat_board::geometry::ViewportGeometry>,
+    pub(crate) beat_auto_scroll: crate::views::beat_board::BeatAutoScrollState,
     pub(crate) beat_layout_cache: crate::views::beat_board::BeatLayoutCache,
     pub(crate) beat_interaction: crate::views::beat_board::BeatInteraction,
     pub(crate) beat_text: crate::views::beat_board::BeatTextState,
@@ -140,7 +141,8 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) timer_body_host_geometry: Option<sprint_timer::geometry::SprintTimerHostGeometry>,
     pub(crate) timer_title_host_geometry: Option<sprint_timer::geometry::SprintTimerHostGeometry>,
     pub(crate) timer_clock_origin: Instant,
-    pub(crate) next_cast_list_refresh: Instant,
+    pub(crate) next_cast_list_refresh: Option<Instant>,
+    pub(crate) observed_cast_list_mutation_token: u64,
     pub(crate) notification_sink: sprint_timer::notifications::NativeNotificationSink,
     pub(crate) notification_results:
         Receiver<(u64, sprint_timer::notifications::NotificationResult)>,
@@ -266,6 +268,8 @@ impl ScriptCraftApp {
         // clones and request egui repaint only after a successful try_send.
         let (replacement_open_event_sender, replacement_open_events) =
             replacement_transport::event_channel();
+        let observed_cast_list_mutation_token = session.mutation_token();
+        let next_cast_list_refresh = Some(Instant::now());
         Ok(Self {
             session,
             invisibles,
@@ -283,6 +287,7 @@ impl ScriptCraftApp {
             root_document_view: RootDocumentView::Script,
             beat_pinch_zoom_percent: f64::from(beat_board_view_state.zoom_milli_percent()) / 1000.0,
             beat_viewport: None,
+            beat_auto_scroll: crate::views::beat_board::BeatAutoScrollState::default(),
             beat_layout_cache: crate::views::beat_board::BeatLayoutCache::default(),
             beat_interaction: crate::views::beat_board::BeatInteraction::default(),
             beat_text: crate::views::beat_board::BeatTextState::default(),
@@ -319,8 +324,8 @@ impl ScriptCraftApp {
             timer_body_host_geometry: None,
             timer_title_host_geometry: None,
             timer_clock_origin: Instant::now(),
-            next_cast_list_refresh: Instant::now()
-                + scriptcraft_model::cast_list::CAST_LIST_REFRESH_INTERVAL,
+            next_cast_list_refresh,
+            observed_cast_list_mutation_token,
             notification_sink,
             notification_results,
             replacement_open_event_sender,
