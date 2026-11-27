@@ -115,7 +115,6 @@ pub(crate) struct StoryMapPalette {
     pub(crate) ruler_mark: Color32,
     pub(crate) overflow_ruler_mark: Color32,
     pub(crate) beat_fill: Color32,
-    pub(crate) beat_border: Color32,
     pub(crate) beat_title: Color32,
     pub(crate) beat_drag_fill: Color32,
     pub(crate) beat_drag_border: Color32,
@@ -324,7 +323,7 @@ impl ApplicationPalette {
                     Color32::from_rgb(54, 54, 54),
                     Color32::from_rgb(10, 10, 10),
                     Color32::from_rgb(180, 180, 180),
-                    Color32::from_rgb(29, 29, 29),
+                    Color32::from_rgb(35, 35, 35),
                 ),
                 ResolvedAppearance::Midnight => (
                     Color32::from_rgb(54, 54, 54),
@@ -400,15 +399,14 @@ impl ApplicationPalette {
             },
             story_map: StoryMapPalette {
                 strip_background: workspace_background,
-                lane_background: workspace_background,
-                label_background: page.paper,
+                lane_background: visuals.faint_bg_color,
+                label_background: workspace_background,
                 label_foreground: page.text,
                 text_foreground: page.text,
-                separator: page.border,
+                separator: page.paper,
                 ruler_mark: page.subdued_text,
                 overflow_ruler_mark: feedback.error,
                 beat_fill: page.paper,
-                beat_border: beat.unselected_card_border,
                 beat_title: page.text,
                 beat_drag_fill: alpha_color(page.selection, 112.0 / 255.0),
                 beat_drag_border: page.selection_boundary,
@@ -425,10 +423,15 @@ impl ApplicationPalette {
                 beat_rejected_fill: alpha_color(feedback.error, 72.0 / 255.0),
                 beat_rejected_border: feedback.error,
                 beat_rejected_title: page.text,
-                scene_fill: alpha_color(page.selection, 24.0 / 255.0),
+                scene_fill: page.paper,
                 scene_border: beat.unselected_card_border,
                 scene_heading: page.text,
-                scene_caret: alpha_color(page.selection_boundary, 0.62),
+                scene_caret: match appearance {
+                    ResolvedAppearance::Day => Color32::from_rgb(0, 114, 229),
+                    ResolvedAppearance::Night | ResolvedAppearance::Midnight => {
+                        Color32::from_rgb(30, 144, 255)
+                    }
+                },
                 scene_preview_body: page.paper,
                 scene_preview_border: page.border,
                 scene_preview_notch: page.paper,
@@ -571,7 +574,7 @@ fn visuals_for_appearance(appearance: ResolvedAppearance) -> egui::Visuals {
             visuals.panel_fill = Color32::from_rgb(44, 44, 44);
             visuals.window_fill = Color32::from_rgb(48, 48, 48);
             visuals.window_stroke.color = Color32::from_rgb(60, 60, 60);
-            visuals.faint_bg_color = Color32::from_rgb(32, 32, 32);
+            visuals.faint_bg_color = Color32::from_rgb(40, 40, 40);
             visuals.extreme_bg_color = Color32::from_rgb(10, 10, 10);
             visuals.text_edit_bg_color = Some(Color32::from_rgb(32, 32, 32));
             visuals.code_bg_color = Color32::from_rgb(64, 64, 64);
@@ -594,7 +597,7 @@ fn visuals_for_appearance(appearance: ResolvedAppearance) -> egui::Visuals {
             visuals.panel_fill = Color32::from_rgb(40, 40, 40);
             visuals.window_fill = Color32::from_rgb(40, 40, 40);
             visuals.window_stroke.color = Color32::from_rgb(55, 55, 55);
-            visuals.faint_bg_color = Color32::from_rgb(28, 28, 28);
+            visuals.faint_bg_color = Color32::from_rgb(22, 22, 22);
             visuals.extreme_bg_color = Color32::from_rgb(8, 8, 8);
             visuals.text_edit_bg_color = Some(Color32::from_rgb(24, 24, 24));
             visuals.code_bg_color = Color32::from_rgb(54, 54, 54);

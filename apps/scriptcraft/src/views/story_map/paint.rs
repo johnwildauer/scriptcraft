@@ -1,31 +1,34 @@
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Stroke, StrokeKind, Vec2};
-use scriptcraft_model::{BeatCard, StoryMapLane};
+use scriptcraft_model::{BeatCard, Project, StoryMapLane};
 
-use crate::chrome::theme::{ApplicationPalette, StoryMapPalette};
+use crate::chrome::theme::{ApplicationPalette, PagePalette, StoryMapPalette};
+use crate::presentation::document_font::PreparedDocumentFonts;
+use crate::presentation::span_paint::font_for_active_family;
 
 use super::{
     constants::{
-        LANE_LABEL_FONT_SIZE, LANE_LABEL_INSET, STATIC_BEAT_BORDER_WIDTH,
-        STATIC_BEAT_CORNER_RADIUS, STATIC_BEAT_HORIZONTAL_INSET, STATIC_BEAT_TITLE_FONT_SIZE,
-        STORY_MAP_BEAT_GHOST_BORDER_WIDTH, STORY_MAP_BEAT_GHOST_CORNER_RADIUS,
+        LANE_LABEL_INSET, RULER_STROKE_DEVICE_PIXELS, STATIC_BEAT_CORNER_RADIUS,
+        STATIC_BEAT_HORIZONTAL_INSET, STORY_MAP_BEAT_GHOST_BORDER_WIDTH,
+        STORY_MAP_BEAT_GHOST_CORNER_RADIUS,
     },
     geometry::{interval_intersects_visible_range, placed_beat_rect, StripGeometry, TimelineGeometry},
     interaction::{BeatGroupRole, BeatInteractionOutput},
+    style,
 };
 
 pub(crate) fn paint_shell(
     ui: &egui::Ui,
     geometry: &StripGeometry,
-    lane_labels: &[String],
+    project: &Project,
+    prepared_fonts: Option<&PreparedDocumentFonts>,
     palette: ApplicationPalette,
-    resize_hovered: bool,
 ) {
     let story_palette = palette.story_map;
     let painter = ui.painter().with_clip_rect(geometry.rect);
     painter.rect_filled(geometry.rect, 0.0, story_palette.strip_background);
     painter.rect_filled(geometry.label_column, 0.0, story_palette.label_background);
 
-    for (row, label) in geometry.lane_rows.iter().zip(lane_labels) {
+    for (row, lane) in geometry.lane_rows.iter().zip(&project.story_map().lanes) {
         let lane_timeline = geometry
             .timeline_viewport
             .intersect(*row)
@@ -37,7 +40,13 @@ pub(crate) fn paint_shell(
             Pos2::new(geometry.label_column.left(), row.top()),
             Pos2::new(geometry.label_column.right(), row.bottom()),
         ));
-        paint_label(ui, label_cell, label, story_palette.label_foreground);
+        let resolved = style::resolve_lane_style(
+            project,
+            lane,
+            prepared_fonts,
+            palette.script_workspace.page,
+        );
+        paint_label(ui, label_cell, &lane.label, resolved.font, resolved.color);
         paint_row_separator(ui, *row, story_palette.separator);
     }
     paint_row_separator(ui, geometry.ruler_row, story_palette.separator);
@@ -45,39 +54,107 @@ pub(crate) fn paint_shell(
         Pos2::new(geometry.label_column.left(), geometry.script_row.top()),
         Pos2::new(geometry.label_column.right(), geometry.script_row.bottom()),
     ));
+    let script_style = style::resolve_scene_heading_style(
+        project,
+        prepared_fonts,
+        palette.script_workspace.page,
+    );
     paint_label(
         ui,
         script_label_cell,
         "Script",
-        story_palette.text_foreground,
+        script_style.font,
+        script_style.color,
     );
     paint_row_separator(ui, geometry.script_row, story_palette.separator);
     paint_row_separator(ui, geometry.scrollbar_row, story_palette.separator);
 
-    let resize_color = if resize_hovered {
-        palette.status.hover_foreground
-    } else {
-        story_palette.separator
-    };
     if geometry.resize_band.is_positive() {
         painter.line_segment(
             [
                 Pos2::new(geometry.rect.left(), geometry.rect.bottom() - 0.5),
                 Pos2::new(geometry.rect.right(), geometry.rect.bottom() - 0.5),
             ],
-            Stroke::new(1.0, resize_color),
+            Stroke::new(1.0, story_palette.separator),
         );
+    }
+}
+
+pub(crate) fn paint_dynamic_lane_grid(
+    ui: &egui::Ui,
+    strip: &StripGeometry,
+    timeline: &TimelineGeometry,
+    pixels_per_point: f64,
+    palette: StoryMapPalette,
+) {
+    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return;
+    }
+    let Some((visible_start, visible_end)) = timeline.visible_page_range() else {
+        return;
+    };
+    let Some(first) = bounded_eighth_index((visible_start * 8.0).ceil()) else {
+        return;
+    };
+    let Some(last) = bounded_eighth_index((visible_end.min(timeline.domain_pages) * 8.0).floor()) else {
+        return;
+    };
+    if first > last {
+        return;
+    }
+    let stroke_width = (RULER_STROKE_DEVICE_PIXELS / pixels_per_point) as f32;
+    if !stroke_width.is_finite() || stroke_width <= 0.0 {
+        return;
+    }
+
+    for row in &strip.lane_rows {
+        let lane_clip = row
+            .intersect(strip.timeline_viewport)
+            .intersect(strip.rect)
+            .intersect(ui.clip_rect());
+        if !lane_clip.is_positive() {
+            continue;
+        }
+        let painter = ui.painter().with_clip_rect(lane_clip);
+        let mut eighth = first;
+        loop {
+            let page_position = eighth as f64 / 8.0;
+            if let Some(screen_x) = timeline
+                .page_to_screen(page_position)
+                .and_then(|x| snap_to_device_pixel_center(x, pixels_per_point))
+            {
+                if screen_x >= lane_clip.left() && screen_x <= lane_clip.right() {
+                    painter.line_segment(
+                        [
+                            Pos2::new(screen_x, lane_clip.top()),
+                            Pos2::new(screen_x, lane_clip.bottom()),
+                        ],
+                        Stroke::new(stroke_width, palette.separator),
+                    );
+                }
+            }
+            if eighth == last {
+                break;
+            }
+            let Some(next) = eighth.checked_add(1) else {
+                break;
+            };
+            eighth = next;
+        }
     }
 }
 
 pub(crate) fn paint_static_beats(
     ui: &egui::Ui,
     strip: &StripGeometry,
+    project: &Project,
     lanes: &[StoryMapLane],
     cards: &[BeatCard],
     target_pages: u32,
     timeline: &TimelineGeometry,
     palette: StoryMapPalette,
+    page_palette: PagePalette,
+    prepared_fonts: Option<&PreparedDocumentFonts>,
     suppressed_cards: &[scriptcraft_model::StableId],
 ) {
     let clip = strip
@@ -99,7 +176,7 @@ pub(crate) fn paint_static_beats(
             .iter()
             .enumerate()
             .filter(|(_, lane)| lane.uuid == placement.lane_uuid);
-        let Some((lane_index, _)) = matching_lanes.next() else {
+        let Some((lane_index, lane)) = matching_lanes.next() else {
             continue;
         };
         if matching_lanes.next().is_some() {
@@ -124,31 +201,29 @@ pub(crate) fn paint_static_beats(
             continue;
         }
         visible.rect_filled(block, STATIC_BEAT_CORNER_RADIUS, palette.beat_fill);
-        visible.rect_stroke(
-            block,
-            STATIC_BEAT_CORNER_RADIUS,
-            Stroke::new(STATIC_BEAT_BORDER_WIDTH, palette.beat_border),
-            StrokeKind::Inside,
-        );
-        paint_static_title(ui, block, &card.title, palette.beat_title);
+        let resolved = style::resolve_lane_style(project, lane, prepared_fonts, page_palette);
+        paint_static_title(ui, block, &card.title, resolved.font, resolved.color);
     }
 }
 
 pub(crate) fn paint_group_preview(
     ui: &egui::Ui,
     strip: &StripGeometry,
+    project: &Project,
     lanes: &[StoryMapLane],
     cards: &[BeatCard],
     output: &BeatInteractionOutput,
     target_pages: u32,
     timeline: &TimelineGeometry,
     palette: StoryMapPalette,
+    page_palette: PagePalette,
+    prepared_fonts: Option<&PreparedDocumentFonts>,
 ) {
     let clip = strip.timeline_viewport.intersect(strip.rect).intersect(ui.clip_rect());
     let painter = ui.painter().with_clip_rect(clip);
     for ghost in &output.ghosts {
         let mut matching = lanes.iter().enumerate().filter(|(_, lane)| lane.uuid == ghost.lane_uuid);
-        let Some((lane_index, _)) = matching.next() else { continue };
+        let Some((lane_index, lane)) = matching.next() else { continue };
         if matching.next().is_some() { continue; }
         let Some(block) = placed_beat_rect(
             strip, lane_index, ghost.start_eighths, ghost.length_eighths, target_pages, timeline, clip,
@@ -169,11 +244,12 @@ pub(crate) fn paint_group_preview(
             Stroke::new(STORY_MAP_BEAT_GHOST_BORDER_WIDTH, border),
             StrokeKind::Inside,
         );
-        paint_static_title(ui, block, &card.title, title);
+        let resolved = style::resolve_lane_style(project, lane, prepared_fonts, page_palette);
+        paint_static_title(ui, block, &card.title, resolved.font, title);
     }
 }
 
-fn paint_static_title(ui: &egui::Ui, block: Rect, title: &str, color: Color32) {
+fn paint_static_title(ui: &egui::Ui, block: Rect, title: &str, font: FontId, color: Color32) {
     if title.is_empty() || !block.is_positive() || !ui.is_rect_visible(block) {
         return;
     }
@@ -183,7 +259,7 @@ fn paint_static_title(ui: &egui::Ui, block: Rect, title: &str, color: Color32) {
     if !title_rect.is_positive() {
         return;
     }
-    let font = FontId::proportional(STATIC_BEAT_TITLE_FONT_SIZE);
+    let font = font_for_active_family(ui, &font);
     let painter = ui.painter().with_clip_rect(block);
     let complete = painter.layout_no_wrap(
         title.to_owned(),
@@ -235,6 +311,20 @@ fn paint_static_title(ui: &egui::Ui, block: Rect, title: &str, color: Color32) {
     painter.galley(position, galley, color);
 }
 
+fn bounded_eighth_index(value: f64) -> Option<u64> {
+    (value.is_finite() && value >= 0.0 && value < u64::MAX as f64).then_some(value as u64)
+}
+
+fn snap_to_device_pixel_center(x: f64, pixels_per_point: f64) -> Option<f32> {
+    if !x.is_finite() || !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return None;
+    }
+    let device_center = (x * pixels_per_point - 0.5).round() + 0.5;
+    let snapped = device_center / pixels_per_point;
+    (snapped.is_finite() && snapped >= f64::from(f32::MIN) && snapped <= f64::from(f32::MAX))
+        .then_some(snapped as f32)
+}
+
 pub(crate) fn paint_zoom_slider_knob(
     ui: &egui::Ui,
     clip_rect: Rect,
@@ -274,16 +364,17 @@ pub(crate) fn paint_zoom_slider_knob(
     );
 }
 
-fn paint_label(ui: &egui::Ui, cell: Rect, label: &str, color: Color32) {
+fn paint_label(ui: &egui::Ui, cell: Rect, label: &str, font: FontId, color: Color32) {
     if !cell.is_positive() {
         return;
     }
+    let font = font_for_active_family(ui, &font);
     let painter = ui.painter().with_clip_rect(cell);
     painter.text(
-        Pos2::new(cell.left() + LANE_LABEL_INSET, cell.center().y),
-        Align2::LEFT_CENTER,
+        Pos2::new(cell.right() - LANE_LABEL_INSET, cell.center().y),
+        Align2::RIGHT_CENTER,
         label,
-        FontId::proportional(LANE_LABEL_FONT_SIZE),
+        font,
         color,
     );
 }

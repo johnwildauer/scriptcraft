@@ -224,7 +224,7 @@ fn handle_slider(
                 .max_rect(rect)
                 .layout(*ui.layout()),
             |ui| {
-            ui.spacing_mut().slider_rail_height = 8.0;
+            ui.spacing_mut().slider_rail_height = STORY_MAP_SLIDER_RAIL_HEIGHT;
             ui.spacing_mut().slider_width = rect.width();
             ui.visuals_mut().widgets.inactive.bg_fill = palette.status.slider_rail;
             ui.visuals_mut().selection.bg_fill = palette.status.slider_trailing_fill;

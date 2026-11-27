@@ -13,7 +13,7 @@ use crate::{
     presentation::{
         document_font::PreparedDocumentFonts,
         geometry,
-        span_paint::resolve_span_paint,
+        span_paint::{font_for_active_family, resolve_span_paint},
     },
 };
 
@@ -451,6 +451,7 @@ fn paint_scrolling_content(
                     let title_clip = fixed_rect_at(origin, layout.title_rect).intersect(inner);
                     let body_clip = fixed_rect_at(origin, layout.body_rect).intersect(inner);
                     let title_ops = prepare_lines(
+                        ui,
                         &painter.with_clip_rect(title_clip),
                         origin,
                         &layout.title_lines,
@@ -458,6 +459,7 @@ fn paint_scrolling_content(
                         prepared,
                     );
                     let body_ops = prepare_lines(
+                        ui,
                         &painter.with_clip_rect(body_clip),
                         origin,
                         &layout.body_lines,
@@ -498,6 +500,7 @@ fn fixed_rect_at(origin: Pos2, rect: scriptcraft_layout::FixedRect) -> Rect {
 }
 
 fn prepare_lines(
+    ui: &egui::Ui,
     painter: &egui::Painter,
     origin: Pos2,
     lines: &[scriptcraft_layout::LayoutLine],
@@ -515,10 +518,11 @@ fn prepare_lines(
                 prepared,
             )?;
             let color = resolved.color;
+            let font = font_for_active_family(ui, &resolved.font);
             let galley = geometry::canonical_singleline_galley(
                 painter,
                 &span.core.display_text,
-                &resolved.font,
+                &font,
                 &span.display_boundary_offsets,
                 color,
                 projection.line_box_height,

@@ -8,6 +8,7 @@ pub(crate) mod projection;
 mod ruler;
 mod scrollbar;
 mod script_track;
+mod style;
 mod viewport;
 
 use eframe::egui::{self, Pos2, Sense, Vec2};
@@ -16,9 +17,8 @@ use scriptcraft_layout::{project_story_map, StoryMapProjectionError};
 use std::time::Instant;
 
 use crate::app::ScriptCraftApp;
-use crate::chrome::status_bar;
 use crate::chrome::theme::ApplicationPalette;
-use crate::views::story_map::constants::MIN_STRIP_HEIGHT;
+use crate::views::story_map::constants::{MIN_STRIP_HEIGHT, STORY_MAP_SCROLLBAR_ROW_HEIGHT};
 
 #[derive(Debug, Default)]
 pub(crate) struct StoryMapResizeState {
@@ -131,18 +131,11 @@ impl ScriptCraftApp {
             Vec2::new(available.x, strip_height),
             Sense::hover(),
         );
-        let labels: Vec<String> = self
-            .session
-            .project()
-            .story_map()
-            .lanes
-            .iter()
-            .map(|lane| lane.label.clone())
-            .collect();
+        let lane_count = self.session.project().story_map().lanes.len();
         let Some(geometry) = geometry::allocate_strip(
             strip_rect,
-            labels.len(),
-            status_bar::default_panel_height(),
+            lane_count,
+            STORY_MAP_SCROLLBAR_ROW_HEIGHT,
         ) else {
             self.story_map_resize.reset();
             self.story_map_navigation.reset();
@@ -165,13 +158,18 @@ impl ScriptCraftApp {
 
         let mut resize_response = None;
         if interaction_area_usable && geometry.resize_band.is_positive() {
+            let resize_cursor = if self.story_map_view_state.height() as f32 <= MIN_STRIP_HEIGHT {
+                egui::CursorIcon::ResizeSouth
+            } else {
+                egui::CursorIcon::ResizeVertical
+            };
             let response = ui
                 .interact(
                     geometry.resize_band,
                     ui.id().with("story-map-bottom-resize"),
                     Sense::drag(),
                 )
-                .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                .on_hover_cursor(resize_cursor);
             resize_response = Some(response);
         }
 
@@ -224,9 +222,14 @@ impl ScriptCraftApp {
             self.story_map_resize.reset();
         }
 
-        let hovered = resize_response.as_ref().is_some_and(|response| response.hovered());
         let palette: ApplicationPalette = self.theme_palette;
-        paint::paint_shell(ui, &geometry, &labels, palette, hovered);
+        paint::paint_shell(
+            ui,
+            &geometry,
+            self.session.project(),
+            self.prepared_document_fonts.as_ref(),
+            palette,
+        );
         let mut scene_clicked = false;
         let mut pointer_on_scene_press = false;
         if interaction_area_usable {
@@ -252,6 +255,13 @@ impl ScriptCraftApp {
                     pixels_per_point,
                     palette.story_map,
                 );
+                paint::paint_dynamic_lane_grid(
+                    ui,
+                    &geometry,
+                    &timeline,
+                    pixels_per_point,
+                    palette.story_map,
+                );
                 let project = self.session.project();
                 let story_map = project.story_map();
                 let beat_enabled = !self.story_map_preview.is_open()
@@ -270,22 +280,28 @@ impl ScriptCraftApp {
                 paint::paint_static_beats(
                     ui,
                     &geometry,
+                    project,
                     &story_map.lanes,
                     &project.beat_board().cards,
                     story_map.target_pages,
                     &timeline,
                     palette.story_map,
+                    palette.script_workspace.page,
+                    self.prepared_document_fonts.as_ref(),
                     &beat_interaction.suppressed_cards,
                 );
                 paint::paint_group_preview(
                     ui,
                     &geometry,
+                    project,
                     &story_map.lanes,
                     &project.beat_board().cards,
                     &beat_interaction,
                     story_map.target_pages,
                     &timeline,
                     palette.story_map,
+                    palette.script_workspace.page,
+                    self.prepared_document_fonts.as_ref(),
                 );
                 script_track::paint(
                     ui,
@@ -293,6 +309,8 @@ impl ScriptCraftApp {
                     &timeline,
                     pixels_per_point,
                     palette.story_map,
+                    palette.script_workspace.page,
+                    project,
                     self.story_map_projection.snapshot(),
                     self.prepared_document_fonts.as_ref(),
                 );

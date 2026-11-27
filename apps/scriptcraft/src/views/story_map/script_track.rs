@@ -1,20 +1,22 @@
 //! Read-only Script-track scene and Body-focus caret paint.
 
-use eframe::egui::{self, Pos2, Rect, Stroke, StrokeKind, Vec2};
+use eframe::egui::{self, FontId, Pos2, Rect, Stroke, Vec2};
 use scriptcraft_layout::{SceneProjection, StoryMapProjection};
+use scriptcraft_model::Project;
 
 use crate::{
-    chrome::theme::StoryMapPalette,
-    presentation::{document_font::PreparedDocumentFonts, span_paint::neutral_resolved_font},
+    chrome::theme::{PagePalette, StoryMapPalette},
+    presentation::document_font::PreparedDocumentFonts,
+    presentation::span_paint::font_for_active_family,
 };
 
 use super::{
     constants::{
-        SCENE_BLOCK_BORDER_WIDTH, SCENE_BLOCK_CORNER_RADIUS, SCENE_BLOCK_HORIZONTAL_INSET,
-        SCENE_BLOCK_TITLE_FONT_SIZE, SCENE_BLOCK_VERTICAL_INSET,
-        SCENE_CARET_STROKE_DEVICE_PIXELS,
+        SCENE_BLOCK_CORNER_RADIUS, SCENE_BLOCK_HORIZONTAL_INSET, SCENE_BLOCK_LEFT_EDGE_WIDTH,
+        SCENE_BLOCK_VERTICAL_INSET, SCENE_CARET_STROKE_DEVICE_PIXELS,
     },
     geometry::{visible_interval_screen_bounds, StripGeometry, TimelineGeometry},
+    style,
 };
 
 pub(crate) fn paint(
@@ -23,6 +25,8 @@ pub(crate) fn paint(
     timeline: &TimelineGeometry,
     pixels_per_point: f64,
     palette: StoryMapPalette,
+    page_palette: PagePalette,
+    project: &Project,
     snapshot: Option<&StoryMapProjection>,
     prepared_fonts: Option<&PreparedDocumentFonts>,
 ) {
@@ -37,7 +41,18 @@ pub(crate) fn paint(
         .intersect(ui.clip_rect());
     if script_clip.is_positive() && ui.is_rect_visible(script_clip) {
         for scene in &snapshot.scenes {
-            paint_scene(ui, script_clip, strip, timeline, scene, palette, prepared_fonts);
+            paint_scene(
+                ui,
+                script_clip,
+                strip,
+                timeline,
+                pixels_per_point,
+                scene,
+                palette,
+                page_palette,
+                project,
+                prepared_fonts,
+            );
         }
     }
 
@@ -56,8 +71,11 @@ fn paint_scene(
     clip: Rect,
     strip: &StripGeometry,
     timeline: &TimelineGeometry,
+    pixels_per_point: f64,
     scene: &SceneProjection,
     palette: StoryMapPalette,
+    page_palette: PagePalette,
+    project: &Project,
     prepared_fonts: Option<&PreparedDocumentFonts>,
 ) {
     let Some(block) = visible_scene_anchor(strip, timeline, scene, clip) else {
@@ -69,40 +87,134 @@ fn paint_scene(
 
     let painter = ui.painter().with_clip_rect(clip);
     painter.rect_filled(block, SCENE_BLOCK_CORNER_RADIUS, palette.scene_fill);
-    painter.rect_stroke(
-        block,
-        SCENE_BLOCK_CORNER_RADIUS,
-        Stroke::new(SCENE_BLOCK_BORDER_WIDTH, palette.scene_border),
-        StrokeKind::Inside,
-    );
-    if let Some(prepared_fonts) = prepared_fonts {
-        let (Some(start_x), Some(end_x)) = (
-            timeline.page_to_screen(scene.start_page),
-            timeline.page_to_screen(scene.end_page),
-        ) else {
-            return;
-        };
-        let heading_x = start_x + f64::from(SCENE_BLOCK_HORIZONTAL_INSET);
-        let available_width = end_x - start_x - 2.0 * f64::from(SCENE_BLOCK_HORIZONTAL_INSET);
-        if !heading_x.is_finite()
-            || !available_width.is_finite()
-            || heading_x < f64::from(f32::MIN)
-            || heading_x > f64::from(f32::MAX)
-            || available_width <= 0.0
-            || available_width > f64::from(f32::MAX)
-        {
-            return;
-        }
-        paint_heading(
-            ui,
-            block,
-            &scene.heading,
-            heading_x as f32,
-            available_width as f32,
-            palette,
-            prepared_fonts,
+    if let Some(start_x) = timeline
+        .page_to_screen(scene.start_page)
+        .filter(|x| x.is_finite() && *x >= f64::from(clip.left()) && *x <= f64::from(clip.right()))
+        .and_then(|x| snap_to_device_pixel_boundary(x, pixels_per_point))
+    {
+        painter.line_segment(
+            [Pos2::new(start_x, block.top()), Pos2::new(start_x, block.bottom())],
+            Stroke::new(SCENE_BLOCK_LEFT_EDGE_WIDTH, palette.scene_border),
         );
     }
+
+    let Some(owner) = project.elements.get(scene.element_index) else {
+        return;
+    };
+    let owner = owner.as_element();
+    if owner.id != scene.owner_id {
+        return;
+    }
+    let heading_palette = PagePalette { text: palette.scene_heading, ..page_palette };
+    let definition = project.element_definitions().get(&owner.element_type);
+    let all_caps = definition.is_some_and(|definition| definition.font.all_caps);
+    let resolved = definition
+        .and_then(|definition| {
+            prepared_fonts.and_then(|prepared| {
+                style::resolve_definition_style(definition, prepared, heading_palette)
+            })
+        })
+        .filter(|resolved| font_for_active_family(ui, &resolved.font) == resolved.font)
+        .or_else(|| {
+            prepared_fonts
+                .and_then(|prepared| style::neutral_courier_fallback(prepared, heading_palette))
+                .filter(|resolved| font_for_active_family(ui, &resolved.font) == resolved.font)
+        })
+        .unwrap_or_else(|| style::generic_fallback(heading_palette));
+
+    let (Some(start_x), Some(end_x)) = (
+        timeline.page_to_screen(scene.start_page),
+        timeline.page_to_screen(scene.end_page),
+    ) else {
+        return;
+    };
+    let heading_x = start_x + f64::from(SCENE_BLOCK_HORIZONTAL_INSET);
+    let available_width = end_x - start_x - 2.0 * f64::from(SCENE_BLOCK_HORIZONTAL_INSET);
+    if !heading_x.is_finite()
+        || !available_width.is_finite()
+        || heading_x < f64::from(f32::MIN)
+        || heading_x > f64::from(f32::MAX)
+        || available_width <= 0.0
+        || available_width > f64::from(f32::MAX)
+    {
+        return;
+    }
+    let display_heading = if all_caps {
+        scene.heading.chars().flat_map(char::to_uppercase).collect::<String>()
+    } else {
+        scene.heading.clone()
+    };
+    let font = font_for_active_family(ui, &resolved.font);
+    paint_heading(
+        ui,
+        block,
+        &display_heading,
+        heading_x as f32,
+        available_width as f32,
+        font,
+        resolved.color,
+    );
+}
+
+fn paint_heading(
+    ui: &egui::Ui,
+    block: Rect,
+    heading: &str,
+    heading_x: f32,
+    available_width: f32,
+    font: FontId,
+    color: eframe::egui::Color32,
+) {
+    if heading.is_empty()
+        || heading.split_whitespace().next().is_none()
+        || !block.is_positive()
+        || !heading_x.is_finite()
+        || !available_width.is_finite()
+        || available_width <= 0.0
+    {
+        return;
+    }
+    let painter = ui.painter().with_clip_rect(block);
+    let full = painter.layout_no_wrap(heading.to_owned(), font.clone(), color);
+    let full_size = full.size();
+    if !finite_size(full_size) {
+        return;
+    }
+    let galley = if full_size.x <= available_width {
+        full
+    } else {
+        let ends = word_ends(heading);
+        let mut fitted = None;
+        for end in ends.iter().rev().filter(|end| **end < heading.len()) {
+            let candidate = painter.layout_no_wrap(heading[..*end].to_owned(), font.clone(), color);
+            let size = candidate.size();
+            if !finite_size(size) {
+                return;
+            }
+            if size.x <= available_width {
+                fitted = Some(candidate);
+                break;
+            }
+        }
+        let Some(fitted) = fitted else {
+            return;
+        };
+        fitted
+    };
+    let size = galley.size();
+    if !finite_size(size)
+        || size.x <= 0.0
+        || size.y <= 0.0
+        || size.x > available_width
+        || size.y > block.height()
+    {
+        return;
+    }
+    let position = Pos2::new(heading_x, block.center().y - size.y * 0.5);
+    if !position.x.is_finite() || !position.y.is_finite() {
+        return;
+    }
+    painter.galley(position, galley, color);
 }
 
 /// The positively clipped visible scene rectangle shared by scene paint and
@@ -132,85 +244,6 @@ pub(crate) fn visible_scene_anchor(
     let block = Rect::from_min_max(Pos2::new(left, top), Pos2::new(right, bottom))
         .intersect(clip);
     block.is_positive().then_some(block)
-}
-
-fn paint_heading(
-    ui: &egui::Ui,
-    block: Rect,
-    heading: &str,
-    heading_x: f32,
-    available_width: f32,
-    palette: StoryMapPalette,
-    prepared_fonts: &PreparedDocumentFonts,
-) {
-    if heading.is_empty()
-        || heading.split_whitespace().next().is_none()
-        || !block.is_positive()
-        || !heading_x.is_finite()
-        || !available_width.is_finite()
-        || available_width <= 0.0
-    {
-        return;
-    }
-    let Some(font) = neutral_resolved_font(SCENE_BLOCK_TITLE_FONT_SIZE, prepared_fonts) else {
-        return;
-    };
-    let resolved_family = font.family.clone();
-    let courier_is_registered = ui.fonts(|fonts| {
-        let definitions = fonts.definitions();
-        definitions
-            .families
-            .get(&resolved_family)
-            .is_some_and(|keys| keys.iter().any(|key| definitions.font_data.contains_key(key)))
-    });
-    if !courier_is_registered {
-        return;
-    }
-    let painter = ui.painter().with_clip_rect(block);
-    let full = painter.layout_no_wrap(heading.to_owned(), font.clone(), palette.scene_heading);
-    let full_size = full.size();
-    if !finite_size(full_size) {
-        return;
-    }
-    let galley = if full_size.x <= available_width {
-        full
-    } else {
-        let ends = word_ends(heading);
-        let mut fitted = None;
-        for end in ends.iter().rev().filter(|end| **end < heading.len()) {
-            let candidate = painter.layout_no_wrap(
-                heading[..*end].to_owned(),
-                font.clone(),
-                palette.scene_heading,
-            );
-            let size = candidate.size();
-            if !finite_size(size) {
-                return;
-            }
-            if size.x <= available_width {
-                fitted = Some(candidate);
-                break;
-            }
-        }
-        let Some(fitted) = fitted else {
-            return;
-        };
-        fitted
-    };
-    let size = galley.size();
-    if !finite_size(size)
-        || size.x <= 0.0
-        || size.y <= 0.0
-        || size.x > available_width
-        || size.y > block.height()
-    {
-        return;
-    }
-    let position = Pos2::new(heading_x, block.center().y - size.y * 0.5);
-    if !position.x.is_finite() || !position.y.is_finite() {
-        return;
-    }
-    painter.galley(position, galley, palette.scene_heading);
 }
 
 fn word_ends(text: &str) -> Vec<usize> {
@@ -267,7 +300,7 @@ fn paint_caret(
     }
     let Some(x) = timeline
         .page_to_screen(caret_page)
-        .and_then(|x| snap_to_device_pixel_center(x, pixels_per_point))
+        .and_then(|x| snap_to_device_pixel_boundary(x, pixels_per_point))
     else {
         return;
     };
@@ -284,12 +317,15 @@ fn paint_caret(
     );
 }
 
-fn snap_to_device_pixel_center(x: f64, pixels_per_point: f64) -> Option<f32> {
+fn snap_to_device_pixel_boundary(x: f64, pixels_per_point: f64) -> Option<f32> {
     if !x.is_finite() || !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
         return None;
     }
-    let center = (x * pixels_per_point - 0.5).round() + 0.5;
-    let snapped = center / pixels_per_point;
+    let device_position = x * pixels_per_point;
+    if !device_position.is_finite() {
+        return None;
+    }
+    let snapped = device_position.round() / pixels_per_point;
     (snapped.is_finite() && snapped >= f64::from(f32::MIN) && snapped <= f64::from(f32::MAX))
         .then_some(snapped as f32)
 }

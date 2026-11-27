@@ -65,10 +65,6 @@ impl StoryMapScrollbarState {
     }
 }
 
-fn alpha(color: egui::Color32, alpha: u8) -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
-}
-
 fn thumb_geometry(geometry: &TimelineGeometry, track: Rect) -> Option<ThumbGeometry> {
     let track_length = track.width();
     if !track.is_positive()
@@ -312,11 +308,7 @@ pub(crate) fn paint(
     };
     let thumb = bar.thumb.shrink2(egui::vec2(0.0, ((bar.thumb.height() - STORY_MAP_SCROLLBAR_THICKNESS) / 2.0).max(0.0)));
     let painter = ui.painter().with_clip_rect(track);
-    painter.rect_filled(thumb, 4.0, alpha(color, 64));
-    painter.rect_stroke(
-        thumb,
-        4.0,
-        egui::Stroke::new(1.0, alpha(color, 128)),
-        egui::StrokeKind::Inside,
-    );
+    let radius = STORY_MAP_SCROLLBAR_THUMB_CORNER_RADIUS
+        .min((thumb.width().min(thumb.height()) / 2.0).max(0.0));
+    painter.rect_filled(thumb, radius, color);
 }

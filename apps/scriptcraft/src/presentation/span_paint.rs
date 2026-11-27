@@ -1,7 +1,7 @@
 //! Shared resolved font and color policy for document span painting.
 
 use crate::{chrome::theme, presentation::document_font};
-use eframe::egui::{Color32, FontFamily, FontId};
+use eframe::egui::{Color32, FontFamily, FontId, Ui};
 use scriptcraft_model::typography::{EffectiveTextColor, EffectiveTextStyle};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -9,6 +9,22 @@ pub(crate) struct ResolvedSpanPaint {
     pub(crate) font: FontId,
     pub(crate) color: Color32,
     pub(crate) unsupported_color: bool,
+}
+
+pub(crate) fn font_for_active_family(ui: &Ui, font: &FontId) -> FontId {
+    let family = font.family.clone();
+    let is_bound = ui.fonts(|fonts| {
+        let definitions = fonts.definitions();
+        definitions
+            .families
+            .get(&family)
+            .is_some_and(|keys| keys.iter().any(|key| definitions.font_data.contains_key(key)))
+    });
+    if is_bound {
+        font.clone()
+    } else {
+        FontId::new(font.size, FontFamily::Proportional)
+    }
 }
 
 pub(crate) fn neutral_resolved_font(
