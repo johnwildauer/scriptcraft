@@ -40,6 +40,8 @@ impl ScriptCraftApp {
         if self.title_viewport_unsupported {
             return;
         }
+        self.reset_body_auto_scroll();
+        crate::presentation::auto_scroll::set_route_owner(ctx, None);
         if self.title_view_reset_pending {
             self.title_view = TitlePageViewState::default();
             self.title_view_reset_pending = false;
@@ -50,6 +52,8 @@ impl ScriptCraftApp {
     }
 
     pub(crate) fn close_title_page_window(&mut self, ctx: &egui::Context) {
+        self.reset_body_auto_scroll();
+        crate::presentation::auto_scroll::set_route_owner(ctx, None);
         if self.title_page_window_open {
             title_page::send_close(ctx);
         }
@@ -127,6 +131,7 @@ impl ScriptCraftApp {
 
 impl ScriptCraftApp {
     pub(crate) fn set_title_page_window_open(&mut self, open: bool) {
+        self.reset_body_auto_scroll();
         self.title_page_window_open = open;
         if !open {
             self.title_view.wheel_zoom.reset();

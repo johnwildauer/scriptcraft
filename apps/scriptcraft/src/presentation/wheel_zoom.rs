@@ -12,11 +12,13 @@ pub(super) const POINTS_PER_ZOOM_E_FOLD: f32 = 200.0;
 #[derive(Debug, Default)]
 pub(crate) struct WheelZoomAdapter {
     middle_button_down: bool,
+    owned_middle_button_down: bool,
 }
 
 impl WheelZoomAdapter {
     pub(crate) fn reset(&mut self) {
         self.middle_button_down = false;
+        self.owned_middle_button_down = false;
     }
 
     pub(super) fn middle_button_down(&self) -> bool {
@@ -30,16 +32,57 @@ impl WheelZoomAdapter {
         events: &mut Vec<egui::Event>,
         viewport_height_points: f32,
     ) -> Vec<f32> {
+        self.adapt_events_inner(events, viewport_height_points, None)
+    }
+
+    /// Root Body variant: retain owned middle events for the shared surface
+    /// gesture while preventing this adapter from latching their press/release.
+    pub(crate) fn adapt_events_filtered(
+        &mut self,
+        events: &mut Vec<egui::Event>,
+        viewport_height_points: f32,
+        mut owner_for_press: impl FnMut(Option<egui::Pos2>) -> Option<crate::presentation::auto_scroll::AutoScrollOwner>,
+    ) -> Vec<f32> {
+        self.adapt_events_inner(events, viewport_height_points, Some(&mut owner_for_press))
+    }
+
+    fn adapt_events_inner(
+        &mut self,
+        events: &mut Vec<egui::Event>,
+        viewport_height_points: f32,
+        mut owner_for_press: Option<&mut dyn FnMut(Option<egui::Pos2>) -> Option<crate::presentation::auto_scroll::AutoScrollOwner>>,
+    ) -> Vec<f32> {
         let mut retained = Vec::with_capacity(events.len());
         let mut factors = Vec::new();
 
         for event in std::mem::take(events) {
             match &event {
                 egui::Event::PointerButton {
+                    pos,
                     button: egui::PointerButton::Middle,
                     pressed,
                     ..
-                } => self.middle_button_down = *pressed,
+                } => {
+                    if *pressed {
+                        let owner = owner_for_press
+                            .as_deref_mut()
+                            .and_then(|route| {
+                                route((pos.x.is_finite() && pos.y.is_finite()).then_some(*pos))
+                            });
+                        if owner.is_some() {
+                            self.middle_button_down = false;
+                            self.owned_middle_button_down = true;
+                        } else {
+                            self.owned_middle_button_down = false;
+                            self.middle_button_down = true;
+                        }
+                    } else if self.owned_middle_button_down {
+                        self.owned_middle_button_down = false;
+                        self.middle_button_down = false;
+                    } else {
+                        self.middle_button_down = false;
+                    }
+                }
                 egui::Event::PointerGone | egui::Event::WindowFocused(false) => {
                     self.reset();
                 }

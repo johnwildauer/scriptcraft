@@ -6,7 +6,8 @@ use egui_material_icons::{
         ICON_FILE_OPEN, ICON_FORMAT_ALIGN_LEFT, ICON_FORMAT_BOLD, ICON_FORMAT_ITALIC,
         ICON_FORMAT_STRIKETHROUGH, ICON_FORMAT_UNDERLINED, ICON_GRID_VIEW,
         ICON_KEYBOARD_ARROW_DOWN, ICON_NOTES, ICON_PICTURE_AS_PDF, ICON_SAVE, ICON_SAVE_AS,
-        ICON_TEXT_FIELDS, ICON_UPLOAD_FILE, ICON_VIEW_LIST, ICON_VISIBILITY, ICON_WEB_ASSET,
+        ICON_TABLE, ICON_TEXT_FIELDS, ICON_UPLOAD_FILE, ICON_VIEW_LIST, ICON_VISIBILITY,
+        ICON_WEB_ASSET,
     },
     MaterialIcon,
 };
@@ -131,6 +132,7 @@ pub(super) enum ToolbarGraphic {
 pub(super) enum ToolbarBehavior {
     None,
     Action(CommandId),
+    ScriptView(ScriptViewMode),
     ElementsRoleDropdown,
     ShowHideDropdown,
     ViewsDropdown,
@@ -254,6 +256,28 @@ pub(super) const VIEWS_CHOICES: [ViewsChoiceSpec; 7] = [
         action: None,
     },
 ];
+
+const fn script_view_item(choice: ViewsChoiceSpec) -> ToolbarItemSpec {
+    let mode = match choice.action {
+        Some(ViewsAction::ScriptMode(mode)) => mode,
+        _ => panic!("standalone Script toolbar item requires a Script view choice"),
+    };
+    ToolbarItemSpec {
+        id: choice.id,
+        label: choice.label,
+        accessibility_name: choice.accessibility_name,
+        caption_visible: true,
+        graphic: ToolbarGraphic::Icon(choice.icon),
+        behavior: ToolbarBehavior::ScriptView(mode),
+        enablement: EnablementPolicy::Enabled,
+        layout: ToolbarLayoutPolicy::Measured,
+        presentation: ItemPresentationOverrides::NONE,
+    }
+}
+
+const SCRIPT_NORMAL_ITEM: ToolbarItemSpec = script_view_item(VIEWS_CHOICES[0]);
+const SCRIPT_PAGE_ITEM: ToolbarItemSpec = script_view_item(VIEWS_CHOICES[1]);
+const SCRIPT_SPEED_ITEM: ToolbarItemSpec = script_view_item(VIEWS_CHOICES[2]);
 
 /// Immutable effective toolbar composition resolved from the raw settings snapshot.
 pub(crate) struct ConfiguredToolbars {
@@ -470,6 +494,17 @@ const EXPORT_TEXT_ITEM: ToolbarItemSpec = ToolbarItemSpec {
     layout: ToolbarLayoutPolicy::Measured,
     presentation: ItemPresentationOverrides::NONE,
 };
+const NAVIGATOR_ITEM: ToolbarItemSpec = ToolbarItemSpec {
+    id: "navigator",
+    label: "Navigator",
+    accessibility_name: "Navigator",
+    caption_visible: true,
+    graphic: ToolbarGraphic::Icon(IconSpec::new(ICON_TABLE)),
+    behavior: ToolbarBehavior::None,
+    enablement: EnablementPolicy::Disabled,
+    layout: ToolbarLayoutPolicy::Measured,
+    presentation: ItemPresentationOverrides::NONE,
+};
 const EXPORT_PDF_ITEM: ToolbarItemSpec = action(
     "export-pdf",
     "Export PDF",
@@ -477,7 +512,7 @@ const EXPORT_PDF_ITEM: ToolbarItemSpec = action(
     CommandId::FileSaveAsPdf,
 );
 
-const BUILTIN_TOOLBAR_ITEM_CATALOG: [ToolbarItemSpec; 17] = [
+const BUILTIN_TOOLBAR_ITEM_CATALOG: [ToolbarItemSpec; 21] = [
     FLEXIBLE_SPACE_ITEM,
     SPACE_ITEM_SPEC,
     NEW_ITEM,
@@ -485,10 +520,14 @@ const BUILTIN_TOOLBAR_ITEM_CATALOG: [ToolbarItemSpec; 17] = [
     SAVE_ITEM,
     SAVE_AS_ITEM,
     VIEWS_ITEM,
+    SCRIPT_NORMAL_ITEM,
+    SCRIPT_PAGE_ITEM,
+    SCRIPT_SPEED_ITEM,
     BEAT_BOARD_ITEM,
     TITLE_PAGE_ITEM,
     ELEMENTS_ITEM,
     SHOW_HIDE_ITEM,
+    NAVIGATOR_ITEM,
     EXPORT_TEXT_ITEM,
     EXPORT_PDF_ITEM,
     STYLE_INLINE_GROUP_ITEM,

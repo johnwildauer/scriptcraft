@@ -16,6 +16,7 @@ pub(crate) mod zoom_scroll;
 
 pub(crate) use self::frame::{
     central_panel_frame, chrome_clear_color, with_editor_surface_scrollbar_presentation,
+    BodyAutoScrollState,
 };
 pub(crate) use self::reveal::RevealIntent;
 pub(crate) use self::note_overlay::{

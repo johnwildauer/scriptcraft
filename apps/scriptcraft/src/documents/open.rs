@@ -646,11 +646,14 @@ impl ScriptCraftApp {
         self.active_body_dual_dialogue_group = None;
         self.surface_focused = false;
         self.session = replacement;
+        self.reset_body_auto_scroll();
         self.script_note_workspace.reset_document_activation();
         self.script_view_mode = script_view_mode;
         self.invisibles = invisibles;
         self.beat_board_view_state = beat_board_view_state;
         self.story_map_view_state = story_map_view_state;
+        self.story_map_pinch_zoom_percent =
+            f64::from(story_map_view_state.zoom_milli_percent()) / 1_000.0;
         self.story_map_resize.reset();
         self.story_map_navigation.reset();
         self.story_map_beat_interaction.reset();

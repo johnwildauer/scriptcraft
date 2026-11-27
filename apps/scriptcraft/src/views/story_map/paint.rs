@@ -424,14 +424,27 @@ pub(crate) fn paint_target_length_button(
     if !cell.is_positive() {
         return None;
     }
-    let size = Vec2::new(STORY_MAP_TARGET_ICON_WIDTH.min(cell.width()), cell.height());
+    let right = (cell.right() - LANE_LABEL_INSET)
+        .max(cell.left())
+        .min(cell.right());
+    if !right.is_finite() {
+        return None;
+    }
+    let available_width = (right - cell.left()).max(0.0);
+    let width = STORY_MAP_TARGET_ICON_WIDTH.min(available_width);
+    let size = Vec2::new(width, cell.height());
     if !size.x.is_finite() || !size.y.is_finite() || size.x <= 0.0 || size.y <= 0.0 {
         return None;
     }
-    let rect = Rect::from_center_size(cell.center(), size).intersect(cell);
+    let rect = Rect::from_min_max(
+        Pos2::new(right - width, cell.top()),
+        Pos2::new(right, cell.bottom()),
+    )
+    .intersect(cell);
     if !rect.is_positive() {
         return None;
     }
+    let allocated_size = rect.size();
     let response = ui.scope(|ui| {
         let widgets = &mut ui.style_mut().visuals.widgets;
         widgets.inactive.fg_stroke.color = palette.ruler_mark;
@@ -448,7 +461,7 @@ pub(crate) fn paint_target_length_button(
                 .size(STORY_MAP_TARGET_ICON_SIZE),
             )
             .frame(false)
-            .min_size(size),
+            .min_size(allocated_size),
         )
     })
     .inner

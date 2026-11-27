@@ -374,6 +374,16 @@ fn apply_toolbar_enablement(items: &mut [ToolbarItemSpec], availability: AppComm
                     EnablementPolicy::Disabled
                 }
             }
+            ToolbarBehavior::ScriptView(mode) => {
+                if ScriptCraftApp::views_action_enabled(
+                    ViewsAction::ScriptMode(mode),
+                    availability,
+                ) {
+                    EnablementPolicy::Enabled
+                } else {
+                    EnablementPolicy::Disabled
+                }
+            }
             ToolbarBehavior::StylesInlineGroup | ToolbarBehavior::AlignmentInlineGroup => {
                 if availability.modal_blocked {
                     EnablementPolicy::Disabled
@@ -879,13 +889,11 @@ impl ScriptCraftApp {
                 label_color,
             );
         }
-        if let Some(action) = toolbar_action_activation(item, response.clicked()) {
-            if let Some(command) = command_for_id(action) {
-                self.dispatch_command(
-                    CommandInvocation::new(command, CommandOrigin::Toolbar),
-                    ui.ctx(),
-                );
-            }
+        if let Some(command) = toolbar_action_activation(item, response.clicked()) {
+            self.dispatch_command(
+                CommandInvocation::new(command, CommandOrigin::Toolbar),
+                ui.ctx(),
+            );
         }
     }
 
@@ -916,7 +924,7 @@ impl ScriptCraftApp {
         let outline_editor_label = ScriptCraftApp::outline_editor_action_label(show_story_map);
         let accessible_name = format!(
             "{}: {}; {}; {}",
-            item.accessibility_name, invisibles_label, ruler_label, outline_editor_label
+            item.accessibility_name, ruler_label, outline_editor_label, invisibles_label
         );
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, accessible_name.clone())
@@ -964,15 +972,6 @@ impl ScriptCraftApp {
         egui::Popup::menu(&response)
             .open_memory(activated.then_some(egui::SetOpenCommand::Toggle))
             .show(|ui| {
-                let invisibles_row = ui.add_enabled(enabled, egui::Button::new(invisibles_label));
-                invisibles_row.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, invisibles_label)
-                });
-                if invisibles_row.clicked() && enabled {
-                    chosen = Some(ShowHideAction::Invisibles);
-                    ui.close();
-                }
-
                 let ruler_row = ui.add_enabled(enabled, egui::Button::new(ruler_label));
                 ruler_row.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, ruler_label)
@@ -993,6 +992,17 @@ impl ScriptCraftApp {
                 });
                 if outline_editor_row.clicked() && enabled {
                     chosen = Some(ShowHideAction::OutlineEditor);
+                    ui.close();
+                }
+
+                ui.add(egui::Separator::default().spacing(4.0).horizontal());
+
+                let invisibles_row = ui.add_enabled(enabled, egui::Button::new(invisibles_label));
+                invisibles_row.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, invisibles_label)
+                });
+                if invisibles_row.clicked() && enabled {
+                    chosen = Some(ShowHideAction::Invisibles);
                     ui.close();
                 }
             });
@@ -1835,6 +1845,21 @@ impl ScriptCraftApp {
                                 ui.close();
                             }
                         }
+                        ToolbarBehavior::ScriptView(mode) => {
+                            let enabled = item.enablement == EnablementPolicy::Enabled;
+                            let response = ui.add_enabled(enabled, egui::Button::new(item.label));
+                            response.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    enabled,
+                                    item.accessibility_name.to_owned(),
+                                )
+                            });
+                            if response.clicked() && enabled {
+                                chosen_views_action = Some(ViewsAction::ScriptMode(mode));
+                                ui.close();
+                            }
+                        }
                         ToolbarBehavior::ElementsRoleDropdown => {
                             let selected_key = self.focused_element_type_key();
                             ui.menu_button(item.label, |ui| {
@@ -1877,29 +1902,12 @@ impl ScriptCraftApp {
                             let accessible_name = format!(
                                 "{}: {}; {}; {}",
                                 item.accessibility_name,
-                                invisibles_label,
                                 ruler_label,
-                                outline_editor_label
+                                outline_editor_label,
+                                invisibles_label
                             );
                             ui.add_enabled_ui(enabled, |ui| {
                                 let submenu = ui.menu_button(item.label, |ui| {
-                                    let invisibles_row = ui.add_enabled(
-                                        enabled,
-                                        egui::Button::new(invisibles_label),
-                                    );
-                                    invisibles_row.widget_info(|| {
-                                        egui::WidgetInfo::labeled(
-                                            egui::WidgetType::Button,
-                                            enabled,
-                                            invisibles_label,
-                                        )
-                                    });
-                                    if invisibles_row.clicked() && enabled {
-                                        chosen_show_hide_action =
-                                            Some(ShowHideAction::Invisibles);
-                                        ui.close();
-                                    }
-
                                     let ruler_row = ui.add_enabled(
                                         enabled,
                                         egui::Button::new(ruler_label),
@@ -1930,6 +1938,27 @@ impl ScriptCraftApp {
                                     if outline_editor_row.clicked() && enabled {
                                         chosen_show_hide_action =
                                             Some(ShowHideAction::OutlineEditor);
+                                        ui.close();
+                                    }
+
+                                    ui.add(
+                                        egui::Separator::default().spacing(4.0).horizontal(),
+                                    );
+
+                                    let invisibles_row = ui.add_enabled(
+                                        enabled,
+                                        egui::Button::new(invisibles_label),
+                                    );
+                                    invisibles_row.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::Button,
+                                            enabled,
+                                            invisibles_label,
+                                        )
+                                    });
+                                    if invisibles_row.clicked() && enabled {
+                                        chosen_show_hide_action =
+                                            Some(ShowHideAction::Invisibles);
                                         ui.close();
                                     }
                                 });
@@ -2093,7 +2122,7 @@ impl ScriptCraftApp {
                         }
                         first = false;
                         ui.push_id((index, item.id), |ui| match item.behavior {
-                            ToolbarBehavior::Action(_) => {
+                            ToolbarBehavior::Action(_) | ToolbarBehavior::ScriptView(_) => {
                                 self.toolbar_action_button(ui, item, width, presentation)
                             }
                             ToolbarBehavior::ElementsRoleDropdown => self.elements_toolbar_item(
@@ -2535,12 +2564,15 @@ fn toolbar_action_fill(style: &egui::Style, enabled: bool, hovered: bool) -> Col
 fn toolbar_action_activation(
     item: ToolbarItemSpec,
     activated: bool,
-) -> Option<scriptcraft_commands::CommandId> {
+) -> Option<Command> {
     if !activated || !toolbar_action_enabled(item) {
         return None;
     }
     match item.behavior {
-        ToolbarBehavior::Action(action) => Some(action),
+        ToolbarBehavior::Action(action) => command_for_id(action),
+        ToolbarBehavior::ScriptView(mode) => {
+            Some(ViewsAction::ScriptMode(mode).command())
+        }
         _ => None,
     }
 }

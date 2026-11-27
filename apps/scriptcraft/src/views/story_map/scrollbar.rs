@@ -49,6 +49,10 @@ impl StoryMapScrollbarState {
         *self = Self::default();
     }
 
+    pub(crate) fn consumes_pointer(&self) -> bool {
+        self.capture.is_some() || self.consumed_press
+    }
+
     pub(crate) fn observe_view(&mut self, ctx: &egui::Context, view: StoryMapViewState) {
         let current = (view.scroll_origin().raw(), view.zoom_milli_percent());
         if self.last_view.is_some_and(|previous| previous != current) {
@@ -154,7 +158,8 @@ pub(crate) fn handle(
     });
     let now = Instant::now();
     let pointer = pointer.filter(|point| point.x.is_finite() && point.y.is_finite());
-    let moved = moved_inside
+    let moved = !gone
+        && moved_inside
         && pointer.is_some_and(|position| state.last_pointer != Some(position));
     if let Some(position) = pointer {
         state.last_pointer = Some(position);
@@ -164,6 +169,7 @@ pub(crate) fn handle(
         state.reveal(ctx, now);
     }
     let pointer_on_active_bar = state.visible
+        && !gone
         && pointer.is_some_and(|position| {
             track.expand(STORY_MAP_SCROLLBAR_HIT_EXPANSION).contains(position)
         });
@@ -189,7 +195,7 @@ pub(crate) fn handle(
                 || capture.zoom_percent != geometry.zoom_percent
         })
     });
-    if escape || !focused || gone || signature_changed || thumb.is_none() {
+    if escape || !focused || signature_changed || thumb.is_none() {
         let was_gesture = state.capture.is_some() || state.consumed_press;
         state.capture = None;
         state.hovered = false;
@@ -201,11 +207,27 @@ pub(crate) fn handle(
         if thumb.is_none() {
             state.visible = false;
         }
+        return was_gesture;
+    }
+
+    if gone && state.capture.is_none() {
+        state.hovered = false;
+        if state.consumed_press {
+            if released || !down {
+                state.consumed_press = false;
+            }
+            return true;
+        }
         return false;
     }
 
     if let Some(capture) = state.capture {
-        if let (Some(bar), Some(position)) = (thumb, pointer) {
+        let drag_position = if down {
+            pointer.or(state.last_pointer)
+        } else {
+            pointer
+        };
+        if let (Some(bar), Some(position)) = (thumb, drag_position) {
             let offset = (position.x - bar.track.left() - capture.grab_offset)
                 .clamp(0.0, bar.travel);
             let origin = if bar.travel > 0.0 {

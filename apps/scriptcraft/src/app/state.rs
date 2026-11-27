@@ -93,6 +93,7 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) invisibles: scriptcraft_fdx::InvisiblesState,
     pub(crate) beat_board_view_state: scriptcraft_fdx::BeatBoardViewState,
     pub(crate) story_map_view_state: scriptcraft_fdx::StoryMapViewState,
+    pub(crate) story_map_pinch_zoom_percent: f64,
     pub(crate) story_map_resize: crate::views::story_map::StoryMapResizeState,
     pub(crate) story_map_navigation: crate::views::story_map::StoryMapNavigationState,
     pub(crate) story_map_beat_interaction: crate::views::story_map::StoryMapBeatInteractionState,
@@ -196,6 +197,7 @@ pub(crate) struct ScriptCraftApp {
     pub(crate) editor_surface_id: Option<egui::Id>,
     pub(crate) title_editor_surface_id: Option<egui::Id>,
     pub(crate) editor_surface_rect: Option<egui::Rect>,
+    pub(crate) body_auto_scroll: crate::views::script::BodyAutoScrollState,
     pub(crate) reveal_intent: RevealIntent,
     pub(crate) preferred_vertical_x: Option<i64>,
     pub(crate) page_geometry: ViewportPageTracker,
@@ -253,6 +255,8 @@ impl ScriptCraftApp {
         let invisibles = builtin_document.invisibles;
         let beat_board_view_state = builtin_document.beat_board_view_state;
         let story_map_view_state = builtin_document.story_map_view_state;
+        let story_map_pinch_zoom_percent =
+            f64::from(story_map_view_state.zoom_milli_percent()) / 1_000.0;
         let project = builtin_document.project;
         let session = EditingSession::with_policy(project, EditPolicy::default())
             .map_err(|error| format!("session failed: {error:?}"))?;
@@ -267,6 +271,7 @@ impl ScriptCraftApp {
             invisibles,
             beat_board_view_state,
             story_map_view_state,
+            story_map_pinch_zoom_percent,
             story_map_resize: crate::views::story_map::StoryMapResizeState::default(),
             story_map_navigation: crate::views::story_map::StoryMapNavigationState::default(),
             story_map_beat_interaction: crate::views::story_map::StoryMapBeatInteractionState::default(),
@@ -366,6 +371,7 @@ impl ScriptCraftApp {
             editor_surface_id: None,
             title_editor_surface_id: None,
             editor_surface_rect: None,
+            body_auto_scroll: crate::views::script::BodyAutoScrollState::default(),
             reveal_intent: RevealIntent::None,
             preferred_vertical_x: None,
             page_geometry: ViewportPageTracker::default(),

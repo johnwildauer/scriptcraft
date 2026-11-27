@@ -55,15 +55,6 @@ pub(crate) fn paint(
             );
         }
     }
-
-    paint_caret(
-        ui,
-        strip,
-        timeline,
-        pixels_per_point,
-        snapshot.caret_page,
-        palette,
-    );
 }
 
 fn paint_scene(
@@ -264,15 +255,18 @@ fn word_ends(text: &str) -> Vec<usize> {
     ends
 }
 
-fn paint_caret(
+pub(crate) fn paint_caret(
     ui: &egui::Ui,
     strip: &StripGeometry,
     timeline: &TimelineGeometry,
     pixels_per_point: f64,
-    caret_page: Option<f64>,
+    snapshot: Option<&StoryMapProjection>,
     palette: StoryMapPalette,
 ) {
-    let Some(caret_page) = caret_page.filter(|page| page.is_finite() && *page >= 0.0) else {
+    let Some(caret_page) = snapshot
+        .and_then(|snapshot| snapshot.caret_page)
+        .filter(|page| page.is_finite() && *page >= 0.0)
+    else {
         return;
     };
     if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {

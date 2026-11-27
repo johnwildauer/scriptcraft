@@ -189,6 +189,12 @@ impl StoryMapBeatInteractionState {
         self.primary_down = false;
     }
 
+    pub(crate) fn blocks_auto_scroll(&self) -> bool {
+        self.press.is_some()
+            || self.swallow_until_release
+            || self.external_geometry.is_some()
+    }
+
     pub(crate) fn last_primary_down(&self) -> bool {
         self.primary_down
     }

@@ -255,6 +255,33 @@ impl TimelineGeometry {
         )
     }
 
+    /// Return a pointer-X-anchored transform at `zoom_percent`.
+    pub(crate) fn zoom_around_pointer(&self, zoom_percent: f64, pointer_x: f64) -> Option<Self> {
+        if !zoom_percent.is_finite() || !pointer_x.is_finite() {
+            return None;
+        }
+        let anchor_page = self.screen_to_page(pointer_x)?;
+        let proposed_zoom = zoom_percent.clamp(self.zoom_min, self.zoom_max);
+        let new_pitch = (UN_SCALED_TARGET_WIDTH / self.target_pages) * proposed_zoom / 100.0;
+        let pointer_offset = pointer_x - self.timeline_left;
+        let new_origin = anchor_page * new_pitch - pointer_offset;
+        if !anchor_page.is_finite()
+            || !new_pitch.is_finite()
+            || !pointer_offset.is_finite()
+            || !new_origin.is_finite()
+        {
+            return None;
+        }
+        Self::new(
+            self.target_pages,
+            self.domain_pages,
+            self.timeline_left,
+            self.viewport_width,
+            proposed_zoom,
+            new_origin,
+        )
+    }
+
     pub(crate) fn with_origin(&self, origin: f64) -> Option<Self> {
         Self::new(
             self.target_pages,

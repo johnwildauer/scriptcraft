@@ -21,13 +21,14 @@ const TEMP_FILE_CANDIDATES: u32 = 1_000;
 const DEFAULT_TOOLBAR_IDS: &[&str] = &[
     "flexible-space",
     "views",
+    "script-page",
     "beat-board",
     "flexible-space",
     "title-page",
     "elements",
     "flexible-space",
     "show-hide",
-    "export-pdf",
+    "navigator",
     "flexible-space",
     "overflow",
 ];

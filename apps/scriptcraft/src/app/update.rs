@@ -9,6 +9,7 @@ use crate::commands::CommandInvocation;
 use crate::{
     chrome::{menu, shortcuts, status_bar, theme},
     documents::open::{show_fdx_migration_dialog, show_startup_open_failure, StagedOpenOutcome},
+    presentation::auto_scroll::{self, AutoScrollOwner},
     views::{
         script::{self as script_view, zoom_scroll::page_geometry_input_invalidated, RevealIntent},
         title_page,
@@ -425,6 +426,12 @@ impl eframe::App for ScriptCraftApp {
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         let root_viewport = raw_input.viewport_id == egui::ViewportId::ROOT;
+        if root_viewport {
+            auto_scroll::set_route_owner(ctx, None);
+        } else {
+            auto_scroll::set_route_owner(ctx, None);
+            self.reset_body_auto_scroll();
+        }
         let target_dialog_open = self.story_map_target_dialog.owns_input();
         let story_map_context_open = self.story_map_context_menu.open;
         if root_viewport && target_dialog_open {
@@ -552,16 +559,100 @@ impl eframe::App for ScriptCraftApp {
             .viewports
             .get(&raw_input.viewport_id)
             .is_some_and(|viewport| viewport.close_requested());
+        let raw_focus_lost = raw_input
+            .viewports
+            .get(&raw_input.viewport_id)
+            .is_some_and(|viewport| viewport.focused == Some(false))
+            || raw_input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::WindowFocused(false)));
+        if viewport_close_requested
+            || raw_focus_lost
+            || !root_viewport
+            || title_page_viewport
+            || self.root_document_view != RootDocumentView::Script
+            || self.body_auto_scroll_blocked(ctx)
+        {
+            self.reset_body_auto_scroll();
+        }
         let viewport_height_points = raw_input
             .screen_rect
             .map_or_else(|| ctx.content_rect().height(), |rect| rect.height());
         let element_dialog_open = self.element_windows.owns_input();
+        self.route_story_map_pinch(
+            ctx,
+            raw_input,
+            viewport_close_requested,
+            target_dialog_open || story_map_context_open,
+        );
         let beat_root_input = !title_page_viewport && !element_viewport
             && !script_note_viewport && !target_dialog_viewport
             && self.root_document_view == RootDocumentView::BeatBoard;
         if beat_root_input {
             self.handle_beat_navigation_input(ctx, raw_input, viewport_close_requested);
         } else {
+        let mut pointer = ctx.input(|input| input.pointer.latest_pos());
+        let body_wheel_over_route = root_viewport
+            && !title_page_viewport
+            && self.root_document_view == RootDocumentView::Script
+            && raw_input.events.iter().any(|event| {
+                match event {
+                    egui::Event::PointerMoved(position)
+                    | egui::Event::PointerButton { pos: position, .. } => {
+                        pointer = Some(*position);
+                        false
+                    }
+                    egui::Event::PointerGone => {
+                        pointer = None;
+                        false
+                    }
+                    egui::Event::MouseWheel { .. } => {
+                        self.body_auto_scroll_owns_middle(ctx, pointer)
+                            || self.body_auto_scroll_contains_route(ctx, pointer)
+                    }
+                    _ => false,
+                }
+            });
+        if body_wheel_over_route {
+            self.cancel_body_auto_scroll();
+        }
+        let body_middle_owners = if root_viewport
+            && !title_page_viewport
+            && !element_viewport
+            && !independent_dialog_viewport
+            && !type_dialog_open
+            && !target_dialog_open
+            && !story_map_context_open
+            && !element_dialog_open
+            && self.root_document_view == RootDocumentView::Script
+            && !viewport_close_requested
+            && !raw_focus_lost
+        {
+            raw_input
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Middle,
+                        pressed: true,
+                        ..
+                    } => Some(if self.body_auto_scroll_owns_middle(ctx, None) {
+                        Some(AutoScrollOwner::Body)
+                    } else if self.story_map_auto_scroll_owns_middle(ctx, *pos) {
+                        Some(AutoScrollOwner::Outline)
+                    } else if self.body_auto_scroll_owns_middle(ctx, Some(*pos)) {
+                        Some(AutoScrollOwner::Body)
+                    } else {
+                        None
+                    }),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let wheel_factors = {
             let adapter = if title_page_viewport {
                 &mut self.title_view.wheel_zoom
@@ -574,6 +665,22 @@ impl eframe::App for ScriptCraftApp {
             {
                 adapter.reset();
                 Vec::new()
+            } else if root_viewport
+                && !title_page_viewport
+                && self.root_document_view == RootDocumentView::Script
+            {
+                let mut owners = body_middle_owners.into_iter();
+                adapter.adapt_events_filtered(
+                    &mut raw_input.events,
+                    viewport_height_points,
+                    |_| {
+                        let owner = owners.next().flatten();
+                        if let Some(owner) = owner {
+                            auto_scroll::set_route_owner(ctx, Some(owner));
+                        }
+                        owner
+                    },
+                )
             } else {
                 adapter.adapt_events(&mut raw_input.events, viewport_height_points)
             }
@@ -708,7 +815,112 @@ fn dialog_menu_shortcuts_allowed(
     shortcuts::shortcut_input_allowed(body_ime_active || title_ime_active, ime_event_in_frame)
 }
 
+fn finite_positive_rect(rect: egui::Rect) -> bool {
+    outline_finite_pos(rect.min)
+        && outline_finite_pos(rect.max)
+        && rect.width().is_finite()
+        && rect.height().is_finite()
+        && rect.is_positive()
+}
+
+fn outline_finite_pos(position: egui::Pos2) -> bool {
+    position.x.is_finite() && position.y.is_finite()
+}
+
 impl ScriptCraftApp {
+    fn route_story_map_pinch(
+        &mut self,
+        ctx: &egui::Context,
+        raw: &mut egui::RawInput,
+        closing: bool,
+        blocked_at_input_start: bool,
+    ) {
+        if raw.viewport_id != egui::ViewportId::ROOT {
+            return;
+        }
+        let focused = raw
+            .viewports
+            .get(&raw.viewport_id)
+            .is_none_or(|viewport| viewport.focused != Some(false));
+        if closing
+            || !focused
+            || blocked_at_input_start
+            || self.story_map_preview.is_open()
+            || self.story_map_preview_input_blocked(ctx)
+        {
+            self.story_map_navigation.pinch_publication = None;
+            return;
+        }
+        let Some(mut publication) = self.story_map_navigation.pinch_publication else {
+            return;
+        };
+        if !finite_positive_rect(publication.interaction_rect) {
+            self.story_map_navigation.pinch_publication = None;
+            return;
+        }
+
+        let mut retained = Vec::with_capacity(raw.events.len());
+        let mut focus_lost = false;
+        for event in std::mem::take(&mut raw.events) {
+            match &event {
+                egui::Event::PointerMoved(position)
+                | egui::Event::PointerButton { pos: position, .. } => {
+                    if outline_finite_pos(*position) {
+                        publication.pointer = Some(*position);
+                    }
+                }
+                egui::Event::PointerGone => publication.pointer = None,
+                egui::Event::WindowFocused(false) => {
+                    publication.pointer = None;
+                    focus_lost = true;
+                }
+                _ => {}
+            }
+            if let egui::Event::Zoom(factor) = &event {
+                let owns_event = !focus_lost
+                    && publication.pointer.is_some_and(|pointer| {
+                        outline_finite_pos(pointer)
+                            && publication.interaction_rect.contains(pointer)
+                    });
+                if owns_event {
+                    let candidate = if factor.is_finite() && *factor > 0.0 {
+                        let candidate = self.story_map_pinch_zoom_percent * f64::from(*factor);
+                        (candidate.is_finite() && candidate > 0.0).then_some(candidate)
+                    } else {
+                        None
+                    };
+                    if let Some(candidate) = candidate {
+                        let pointer_x = publication.pointer.map(|pointer| f64::from(pointer.x));
+                        if let Some((timeline, changed, continuous_zoom)) =
+                            crate::views::story_map::viewport::commit_pinch_zoom(
+                                &mut self.story_map_view_state,
+                                publication.timeline,
+                                candidate,
+                                pointer_x,
+                            )
+                        {
+                            publication.timeline = timeline;
+                            self.story_map_pinch_zoom_percent = continuous_zoom;
+                            if changed {
+                                ctx.request_repaint();
+                            }
+                        }
+                    }
+                    // Owned zoom input is consumed even when validation or fixed-state
+                    // conversion rejects the candidate; no other surface may apply it.
+                    continue;
+                }
+            }
+            retained.push(event);
+        }
+        raw.events = retained;
+        if focus_lost {
+            self.story_map_navigation.pinch_publication = None;
+        } else {
+            self.story_map_navigation.pinch_publication = Some(publication);
+        }
+    }
+
     /// Process Beat wheel and pinch in raw event order, before egui accumulates
     /// smooth scrolling and before queued Save commands capture view state.
     fn handle_beat_navigation_input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput, closing: bool) {
@@ -1050,6 +1262,7 @@ impl ScriptCraftApp {
         }
         if root_close_allowed {
             measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
+                app.reset_body_auto_scroll();
                 app.script_note_workspace.reset_document_activation();
                 app.close_title_page_window(&ctx);
                 app.story_map_target_dialog.reset();

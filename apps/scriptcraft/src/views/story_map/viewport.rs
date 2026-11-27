@@ -10,6 +10,7 @@ use super::{
     paint,
     scrollbar::{self, StoryMapScrollbarState},
 };
+use crate::presentation::auto_scroll::AutoScrollGesture;
 use crate::chrome::theme::{ApplicationPalette, EditorScrollbarPalette};
 
 fn fixed_milli(value: f64) -> Option<BoardFixed> {
@@ -61,6 +62,7 @@ fn derive_and_clamp(
     target_pages: f64,
     domain_pages: f64,
     view: &mut StoryMapViewState,
+    pinch_zoom_percent: &mut f64,
 ) -> Option<TimelineGeometry> {
     let viewport = strip.timeline_viewport;
     let width = f64::from(viewport.width());
@@ -86,6 +88,9 @@ fn derive_and_clamp(
         f64::from(next.zoom_milli_percent()) / 1_000.0,
         next.scroll_origin().raw() as f64 / BoardFixed::SCALE as f64,
     )?;
+    if next.zoom_milli_percent() != view.zoom_milli_percent() {
+        *pinch_zoom_percent = geometry.zoom_percent;
+    }
     *view = next;
     Some(committed)
 }
@@ -137,14 +142,15 @@ fn handle_wheel(
     geometry: TimelineGeometry,
     view: &mut StoryMapViewState,
     scrollbars: &mut StoryMapScrollbarState,
-) -> TimelineGeometry {
+    auto_scroll: &mut AutoScrollGesture,
+) -> (TimelineGeometry, bool) {
     let ctx = ui.ctx();
     let pointer = ctx.input(|input| input.pointer.interact_pos());
     let over_timeline = pointer.is_some_and(|position| {
         position.x.is_finite() && position.y.is_finite() && timeline_rect.contains(position)
     });
     if !over_timeline {
-        return geometry;
+        return (geometry, false);
     }
     let events = ctx.input(|input| input.events.clone());
     let mut next = geometry;
@@ -169,7 +175,8 @@ fn handle_wheel(
                         geometry.viewport_width,
                         f64::from(new_state.zoom_milli_percent()) / 1_000.0,
                         new_state.scroll_origin().raw() as f64 / BoardFixed::SCALE as f64,
-                    ) {
+                ) {
+                    auto_scroll.cancel();
                     if new_state != *view {
                         *view = new_state;
                         next = committed;
@@ -197,7 +204,7 @@ fn handle_wheel(
         });
         ctx.request_repaint();
     }
-    next
+    (next, consumed)
 }
 
 fn handle_slider(
@@ -205,11 +212,13 @@ fn handle_slider(
     rect: Rect,
     geometry: TimelineGeometry,
     view: &mut StoryMapViewState,
+    pinch_zoom_percent: &mut f64,
     scrollbars: &mut StoryMapScrollbarState,
     palette: ApplicationPalette,
-) -> (TimelineGeometry, Option<Response>) {
+    auto_scroll: &mut AutoScrollGesture,
+) -> (TimelineGeometry, Option<Response>, bool) {
     if !rect.is_positive() {
-        return (geometry, None);
+        return (geometry, None, false);
     }
     let mut zoom = geometry.zoom_percent;
     let range_is_active = geometry.zoom_max > geometry.zoom_min;
@@ -267,41 +276,76 @@ fn handle_slider(
                     f64::from(next.zoom_milli_percent()) / 1_000.0,
                     next.scroll_origin().raw() as f64 / BoardFixed::SCALE as f64,
                 ) {
+                    auto_scroll.cancel();
+                    *pinch_zoom_percent = zoom;
                     if next != *view {
                         *view = next;
                         scrollbars.observe_view(ui.ctx(), *view);
                         ui.ctx().request_repaint();
                     }
-                    return (committed, Some(response));
+                    return (committed, Some(response), true);
                 }
             }
         }
     }
-    (geometry, Some(response))
+    (geometry, Some(response), false)
 }
 
 /// Applies current-width clamps, slider/wheel navigation, and thumb input. The
-/// returned transform is the one paint and later ruler/Beat/scene consumers share.
+/// returned transform is the one paint and later ruler/Beat/scene consumers share,
+/// alongside whether the scrollbar consumed the current pointer gesture.
 pub(crate) fn compose_navigation(
     ui: &mut egui::Ui,
     strip: &StripGeometry,
     target_pages: f64,
     domain_pages: f64,
     view: &mut StoryMapViewState,
+    pinch_zoom_percent: &mut f64,
     scrollbars: &mut StoryMapScrollbarState,
+    auto_scroll: &mut AutoScrollGesture,
     palette: ApplicationPalette,
-) -> Option<(TimelineGeometry, Rect)> {
+) -> Option<(TimelineGeometry, Rect, bool, bool)> {
     let slider = slider_rect(strip)?;
-    let mut timeline = derive_and_clamp(strip, target_pages, domain_pages, view)?;
+    let mut timeline = derive_and_clamp(
+        strip,
+        target_pages,
+        domain_pages,
+        view,
+        pinch_zoom_percent,
+    )?;
     let track = navigation_track(strip, slider)?;
     scrollbars.observe_view(ui.ctx(), *view);
 
-    timeline = handle_wheel(ui, strip.timeline_viewport, timeline, view, scrollbars);
-    let (after_slider, _) = handle_slider(ui, slider, timeline, view, scrollbars, palette);
+    let (after_wheel, wheel_consumed) = handle_wheel(
+        ui,
+        strip.timeline_viewport,
+        timeline,
+        view,
+        scrollbars,
+        auto_scroll,
+    );
+    timeline = after_wheel;
+    let (after_slider, _, slider_changed) = handle_slider(
+        ui,
+        slider,
+        timeline,
+        view,
+        pinch_zoom_percent,
+        scrollbars,
+        palette,
+        auto_scroll,
+    );
     timeline = after_slider;
 
     let palette_scrollbar: EditorScrollbarPalette = palette.script_workspace.editor_scrollbar;
-    scrollbar::handle(
+    let primary_pressed_on_navigation_row = ui.ctx().input(|input| {
+        input.pointer.primary_pressed()
+            && input.pointer.interact_pos().is_some_and(|position| strip.scrollbar_row.contains(position))
+    });
+    if primary_pressed_on_navigation_row || scrollbars.consumes_pointer() {
+        auto_scroll.cancel();
+    }
+    let consumed = scrollbar::handle(
         ui,
         strip.rect,
         track,
@@ -310,6 +354,9 @@ pub(crate) fn compose_navigation(
         scrollbars,
         palette_scrollbar,
     );
+    if consumed {
+        auto_scroll.cancel();
+    }
     // Thumb capture may have updated the origin; derive once more from the same
     // immutable policy so the geometry returned to all consumers is current.
     let timeline = TimelineGeometry::new(
@@ -322,5 +369,90 @@ pub(crate) fn compose_navigation(
     )?;
     scrollbars.observe_view(ui.ctx(), *view);
     scrollbar::paint(ui, &timeline, track, scrollbars, palette_scrollbar);
-    Some((timeline, track))
+    Some((timeline, track, consumed, wheel_consumed || slider_changed || consumed))
+}
+
+/// Apply only the horizontal component through the same fixed-origin state path
+/// used by wheel and thumb navigation, then reconcile from the stored state.
+pub(crate) fn commit_auto_scroll_delta(
+    ctx: &egui::Context,
+    timeline: TimelineGeometry,
+    delta: egui::Vec2,
+    view: &mut StoryMapViewState,
+    scrollbars: &mut StoryMapScrollbarState,
+    gesture: &mut AutoScrollGesture,
+) -> Option<TimelineGeometry> {
+    if !delta.x.is_finite() || !delta.y.is_finite() {
+        gesture.reset();
+        return None;
+    }
+    if delta.x == 0.0 {
+        return Some(timeline);
+    }
+    let requested = timeline.origin + f64::from(delta.x);
+    if !requested.is_finite() {
+        gesture.reset();
+        return None;
+    }
+    let Some(candidate) = timeline.with_origin(requested) else {
+        gesture.reset();
+        return None;
+    };
+    let next = state_with_geometry(*view, &candidate, timeline.viewport_width);
+    let Some(next) = next else {
+        gesture.reset();
+        return None;
+    };
+    let committed = TimelineGeometry::new(
+        timeline.target_pages,
+        timeline.domain_pages,
+        timeline.timeline_left,
+        timeline.viewport_width,
+        f64::from(next.zoom_milli_percent()) / 1_000.0,
+        next.scroll_origin().raw() as f64 / BoardFixed::SCALE as f64,
+    );
+    let Some(committed) = committed else {
+        gesture.reset();
+        return None;
+    };
+    if next != *view {
+        *view = next;
+        scrollbars.observe_view(ctx, *view);
+        ctx.request_repaint();
+    }
+    Some(committed)
+}
+
+/// Commit an Outline-owned continuous pinch through the existing fixed-state path.
+/// The returned zoom is the clamped continuous value, not its milli-percent rounding.
+pub(crate) fn commit_pinch_zoom(
+    view: &mut StoryMapViewState,
+    timeline: TimelineGeometry,
+    requested_zoom: f64,
+    pointer_x: Option<f64>,
+) -> Option<(TimelineGeometry, bool, f64)> {
+    if !requested_zoom.is_finite() || requested_zoom <= 0.0 {
+        return None;
+    }
+    let requested_zoom = requested_zoom.clamp(timeline.zoom_min, timeline.zoom_max);
+    let candidate = pointer_x
+        .filter(|x| x.is_finite())
+        .and_then(|x| timeline.zoom_around_pointer(requested_zoom, x))
+        .or_else(|| timeline.zoom_around_center(requested_zoom))?;
+    let continuous_zoom = candidate.zoom_percent;
+    if !continuous_zoom.is_finite() || continuous_zoom <= 0.0 {
+        return None;
+    }
+    let next = state_with_geometry(*view, &candidate, timeline.viewport_width)?;
+    let committed = TimelineGeometry::new(
+        timeline.target_pages,
+        timeline.domain_pages,
+        timeline.timeline_left,
+        timeline.viewport_width,
+        f64::from(next.zoom_milli_percent()) / 1_000.0,
+        next.scroll_origin().raw() as f64 / BoardFixed::SCALE as f64,
+    )?;
+    let changed = next != *view;
+    *view = next;
+    Some((committed, changed, continuous_zoom))
 }

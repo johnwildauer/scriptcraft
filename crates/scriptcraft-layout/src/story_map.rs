@@ -7,7 +7,7 @@ use crate::{
 };
 use scriptcraft_model::{
     formatting::FixedPoint,
-    layout_inputs::DocumentLeading,
+    layout_inputs::{DocumentLeading, PageLayoutInputs},
     typography::{EffectiveTextStyle, FaceStyle, NEUTRAL_COURIER_PRIME_FAMILY},
     Position, Project, StableId, TextRun,
 };
@@ -293,7 +293,6 @@ pub fn project_story_map(
     if layout.composition != LayoutComposition::BodyEditor || layout.inputs.paper_height == 0 {
         return Err(StoryMapProjectionError::InvalidLayout);
     }
-    let paper_height = layout.inputs.paper_height;
     let scene_indexes = project
         .elements
         .iter()
@@ -319,7 +318,11 @@ pub fn project_story_map(
                 .raw()
                 .checked_add(located.line.geometry.height.raw())
                 .ok_or(StoryMapProjectionError::InvalidGeometry)?;
-            line_page_position(located, FixedPoint::from_raw(bottom_raw), paper_height)
+            line_page_position(
+                located,
+                FixedPoint::from_raw(bottom_raw),
+                &layout.layout_environment.page,
+            )
         })
         .transpose()?;
     if !scene_indexes.is_empty() && final_body_line_bottom.is_none() {
@@ -337,7 +340,7 @@ pub fn project_story_map(
         scene_starts.push(line_page_position(
             located,
             located.line.geometry.y,
-            paper_height,
+            &layout.layout_environment.page,
         )?);
     }
 
@@ -394,7 +397,12 @@ pub fn project_story_map(
         .ok()
         .filter(|located| is_body_line(layout, *located))
         .and_then(|located| {
-            line_page_position(located, located.line.geometry.y, paper_height).ok()
+            line_page_position(
+                located,
+                located.line.geometry.y,
+                &layout.layout_environment.page,
+            )
+            .ok()
         });
 
     Ok(StoryMapProjection {
@@ -426,7 +434,7 @@ fn is_body_line(layout: &ScreenplayLayout, located: LocatedLayoutLine<'_>) -> bo
 fn line_page_position(
     located: LocatedLayoutLine<'_>,
     y: FixedPoint,
-    paper_height: u32,
+    inputs: &PageLayoutInputs,
 ) -> Result<f64, StoryMapProjectionError> {
     let page = u64::try_from(located.page_index)
         .map_err(|_| StoryMapProjectionError::InvalidGeometry)?;
@@ -435,12 +443,30 @@ fn line_page_position(
     if page > (1_u64 << 53) {
         return Err(StoryMapProjectionError::InvalidGeometry);
     }
-    let height_raw = i64::from(paper_height)
+    let paper_height_raw = i64::from(inputs.paper_height)
         .checked_mul(FixedPoint::SCALE)
-        .filter(|height| *height > 0)
         .ok_or(StoryMapProjectionError::InvalidGeometry)?;
-    let y_raw = y.raw().clamp(0, height_raw);
-    let fraction = y_raw as f64 / height_raw as f64;
+    let margin_top_raw = i64::from(inputs.margin_top)
+        .checked_mul(FixedPoint::SCALE)
+        .ok_or(StoryMapProjectionError::InvalidGeometry)?;
+    let margin_bottom_raw = i64::from(inputs.margin_bottom)
+        .checked_mul(FixedPoint::SCALE)
+        .ok_or(StoryMapProjectionError::InvalidGeometry)?;
+    let text_top_raw = margin_top_raw;
+    let text_bottom_raw = paper_height_raw
+        .checked_sub(margin_bottom_raw)
+        .ok_or(StoryMapProjectionError::InvalidGeometry)?;
+    let text_height_raw = text_bottom_raw
+        .checked_sub(text_top_raw)
+        .ok_or(StoryMapProjectionError::InvalidGeometry)?;
+    if paper_height_raw <= 0 || text_height_raw <= 0 {
+        return Err(StoryMapProjectionError::InvalidGeometry);
+    }
+    let clamped_y_raw = y.raw().clamp(text_top_raw, text_bottom_raw);
+    let text_relative_y_raw = clamped_y_raw
+        .checked_sub(text_top_raw)
+        .ok_or(StoryMapProjectionError::InvalidGeometry)?;
+    let fraction = text_relative_y_raw as f64 / text_height_raw as f64;
     let page_position = page as f64 + fraction;
     if page_position.is_finite() {
         Ok(page_position)

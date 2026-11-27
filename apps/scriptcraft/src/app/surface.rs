@@ -53,6 +53,8 @@ impl ScriptCraftApp {
 
     pub(crate) fn set_root_document_view(&mut self, view: RootDocumentView, ctx: &egui::Context) {
         if self.root_document_view == view { return; }
+        self.reset_body_auto_scroll();
+        crate::presentation::auto_scroll::set_route_owner(ctx, None);
         self.root_document_view = view;
         self.beat_viewport = None;
         self.beat_interaction.cancel();
@@ -118,6 +120,7 @@ impl ScriptCraftApp {
 
     pub(crate) fn set_active_editor_surface(&mut self, surface: EditorSurface) {
         if self.active_editor_surface != surface {
+            self.reset_body_auto_scroll();
             if self.active_editor_surface == EditorSurface::TitlePage
                 && !self.title_view_state_swapped
             {
@@ -201,6 +204,7 @@ impl ScriptCraftApp {
     }
 
     pub(crate) fn swap_title_view_state(&mut self) {
+        self.reset_body_auto_scroll();
         std::mem::swap(
             &mut self.surface_focused,
             &mut self.title_view.surface_focused,
@@ -289,6 +293,9 @@ impl ScriptCraftApp {
         if self.zoom_for_surface(surface) == zoom {
             return;
         }
+        if surface == EditorSurface::Body && !self.title_view_state_swapped {
+            self.cancel_body_auto_scroll();
+        }
         self.capture_pending_zoom_anchor_for(surface, ctx);
         match surface {
             EditorSurface::Body => {
@@ -365,6 +372,9 @@ impl ScriptCraftApp {
     }
 
     pub(crate) fn capture_pending_zoom_anchor(&mut self, ctx: &egui::Context) {
+        if !self.title_view_state_swapped {
+            self.cancel_body_auto_scroll();
+        }
         if self.pending_zoom_anchor.is_none() {
             let anchor = self.page_geometry.capture_center_anchor(
                 self.performance.frames,
