@@ -118,6 +118,8 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         && !availability.replacement_pending
         && !availability.modal_blocked
         && !availability.native_output_active
+        && !availability.story_map_target_dialog_open
+        && !availability.story_map_context_menu_open
         && !(app.menu_policy.in_window_shortcuts_owned() && menu::in_window_menu_popup_open(&ctx));
     let _ = app.refresh_dynamic_controls();
     let controls = app
@@ -131,7 +133,9 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         element_windows_own_input
             || availability.replacement_pending
             || availability.modal_blocked
-            || availability.native_output_active,
+            || availability.native_output_active
+            || availability.story_map_target_dialog_open
+            || availability.story_map_context_menu_open,
         modifiers,
         shortcuts::ShortcutPlatform::current(),
         &controls.shortcuts,
@@ -291,8 +295,44 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
                 });
             }
             scene_interaction
-        });
+    });
     let mut scene_interaction = central.inner;
+    let availability = app.app_command_availability();
+    let higher_priority_input_owner = availability.modal_blocked
+        || availability.replacement_pending
+        || availability.native_output_active
+        || app.element_windows.owns_input()
+        || app.title_view.surface_focused
+        || app.title_view_state_swapped
+        || app.title_page_window_open
+        || app.script_note_workspace.open_note.is_some()
+        || app.script_note_workspace.new_type_dialog_open
+        || app.sprint_timer.popup_open;
+    let context_action = if higher_priority_input_owner {
+        app.story_map_context_menu.close();
+        None
+    } else {
+        crate::views::story_map::context_menu::show(
+            &mut app.story_map_context_menu,
+            &ctx,
+            ctx.content_rect(),
+        )
+    };
+    match context_action {
+        Some(crate::views::story_map::context_menu::StoryMapContextMenuAction::HideOutlineEditor) => {
+            app.dispatch_command(
+                CommandInvocation::new(
+                    Command::ViewOutlineEditorToggle,
+                    CommandOrigin::Pointer,
+                ),
+                &ctx,
+            );
+        }
+        Some(crate::views::story_map::context_menu::StoryMapContextMenuAction::ChangeTargetScriptLength { anchor }) => {
+            let _ = crate::views::story_map::target_dialog::open(app, &ctx, anchor);
+        }
+        None => {}
+    }
     if let Some(command) = app.beat_drag_coordinator.take_command_intent() {
         app.dispatch_command(
             CommandInvocation::new(command, CommandOrigin::Pointer),
@@ -344,11 +384,16 @@ fn show_application_panels(app: &mut ScriptCraftApp, ui: &mut egui::Ui) -> egui:
         app.timer_popup_surface = EditorSurface::Body;
         app.timer_title_host_geometry = None;
     }
-    if !app.element_windows.owns_input() {
+    if !app.element_windows.owns_input()
+        && !app.story_map_target_dialog.owns_input()
+        && !app.story_map_context_menu.open
+    {
         app.open_pending_sprint_timer_completion(EditorSurface::Body, timer_button_rect, &ctx);
     }
     let timer_commands = if app.timer_popup_surface == EditorSurface::Body
         && !app.element_windows.owns_input()
+        && !app.story_map_target_dialog.owns_input()
+        && !app.story_map_context_menu.open
     {
         let host_geometry = app.sprint_timer_host_geometry(EditorSurface::Body);
         sprint_timer::show_popup_with_host_geometry(&ctx, &mut app.sprint_timer, now, host_geometry)
@@ -379,7 +424,41 @@ impl eframe::App for ScriptCraftApp {
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        self.forward_story_map_body_activity(ctx, raw_input);
+        let root_viewport = raw_input.viewport_id == egui::ViewportId::ROOT;
+        let target_dialog_open = self.story_map_target_dialog.owns_input();
+        let story_map_context_open = self.story_map_context_menu.open;
+        if root_viewport && target_dialog_open {
+            raw_input.events.clear();
+        } else if root_viewport && story_map_context_open {
+            let popup_rect = self.story_map_context_menu.popup_rect();
+            let popup_contains = |point: egui::Pos2| popup_rect.is_some_and(|rect| rect.contains(point));
+            let outside_press = raw_input.events.iter().any(|event| {
+                matches!(event,
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        ..
+                    } if !popup_contains(*pos))
+            });
+            let escape_pressed = raw_input.events.iter().any(|event| {
+                matches!(event, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. })
+            });
+            if outside_press || escape_pressed {
+                self.story_map_context_menu.close();
+                self.command_projection_cache = None;
+            }
+            raw_input.events.retain(|event| match event {
+                egui::Event::PointerMoved(_) | egui::Event::PointerGone
+                | egui::Event::WindowFocused(_) => true,
+                egui::Event::PointerButton { pos, .. } => !outside_press && popup_contains(*pos),
+                egui::Event::Key { key: egui::Key::Escape, pressed: false, .. } => true,
+                _ => false,
+            });
+        }
+        if !target_dialog_open && !story_map_context_open {
+            self.forward_story_map_body_activity(ctx, raw_input);
+        }
         if status_modifiers_changed(self.last_status_modifiers, raw_input.modifiers) {
             self.last_status_modifiers = raw_input.modifiers;
             // Modifier-only transitions may not produce a semantic editor
@@ -407,6 +486,9 @@ impl eframe::App for ScriptCraftApp {
             || raw_input.viewport_id == crate::widgets::script_note::type_dialog::viewport_id()
             || raw_input.viewport_id == crate::widgets::script_note::properties::color_viewport_id()
             || raw_input.viewport_id == crate::widgets::script_note::properties::type_viewport_id();
+        let target_dialog_viewport = raw_input.viewport_id
+            == crate::views::story_map::target_dialog::viewport_id();
+        let independent_dialog_viewport = script_note_viewport || target_dialog_viewport;
         let type_dialog_open = self.script_note_workspace.new_type_dialog_open;
         let note_family_open = self.script_note_workspace.open_note.is_some() || type_dialog_open;
         if raw_input.viewport_id == egui::ViewportId::ROOT && note_family_open {
@@ -458,9 +540,9 @@ impl eframe::App for ScriptCraftApp {
         let element_viewport = raw_input.viewport_id
             == crate::widgets::elements::inspector::viewport_id()
             || raw_input.viewport_id == crate::widgets::elements::selector::viewport_id();
-        let scale_changed = !element_viewport && !script_note_viewport && !type_dialog_open
+        let scale_changed = !element_viewport && !independent_dialog_viewport && !type_dialog_open
             && self.effective_pixels_per_point != Some(effective_pixels_per_point);
-        if !element_viewport && !script_note_viewport && !type_dialog_open {
+        if !element_viewport && !independent_dialog_viewport && !type_dialog_open {
             self.effective_pixels_per_point = Some(effective_pixels_per_point);
         }
 
@@ -474,7 +556,8 @@ impl eframe::App for ScriptCraftApp {
             .screen_rect
             .map_or_else(|| ctx.content_rect().height(), |rect| rect.height());
         let element_dialog_open = self.element_windows.owns_input();
-        let beat_root_input = !title_page_viewport && !element_viewport && !script_note_viewport
+        let beat_root_input = !title_page_viewport && !element_viewport
+            && !script_note_viewport && !target_dialog_viewport
             && self.root_document_view == RootDocumentView::BeatBoard;
         if beat_root_input {
             self.handle_beat_navigation_input(ctx, raw_input, viewport_close_requested);
@@ -485,7 +568,10 @@ impl eframe::App for ScriptCraftApp {
             } else {
                 &mut self.wheel_zoom
             };
-            if viewport_close_requested || element_dialog_open || element_viewport || script_note_viewport || type_dialog_open {
+            if viewport_close_requested || element_dialog_open || element_viewport
+                || independent_dialog_viewport || type_dialog_open || target_dialog_open
+                || story_map_context_open
+            {
                 adapter.reset();
                 Vec::new()
             } else {
@@ -494,7 +580,7 @@ impl eframe::App for ScriptCraftApp {
         };
         let surface = if title_page_viewport {
             Some(EditorSurface::TitlePage)
-        } else if script_note_viewport {
+        } else if independent_dialog_viewport {
             None
         } else if element_viewport {
             None
@@ -509,7 +595,7 @@ impl eframe::App for ScriptCraftApp {
 
         for event in &raw_input.events {
             if !element_dialog_open && !element_viewport {
-                    if !script_note_viewport && !type_dialog_open {
+                    if !independent_dialog_viewport && !type_dialog_open && !target_dialog_open {
                     if let egui::Event::Zoom(factor) = event {
                         if let Some(surface) = surface { self.set_active_editor_surface(surface); }
                         self.record_native_event("zoom");
@@ -528,7 +614,7 @@ impl eframe::App for ScriptCraftApp {
         }
         // The app has consumed the event for page zoom. Keep it out of egui's
         // later input-state zoom delta so no other surface can apply it again.
-        if element_dialog_open || element_viewport || script_note_viewport || type_dialog_open {
+        if element_dialog_open || element_viewport || independent_dialog_viewport || type_dialog_open || target_dialog_open {
             raw_input
                 .events
                 .retain(|event| !matches!(event, egui::Event::Zoom(_)));
@@ -542,7 +628,8 @@ impl eframe::App for ScriptCraftApp {
             .events
             .iter()
             .any(|event| matches!(event, egui::Event::Ime(_)));
-        if !script_note_viewport && !type_dialog_open && self.menu_policy.in_window_shortcuts_owned()
+        if !independent_dialog_viewport && !type_dialog_open && !target_dialog_open
+            && !story_map_context_open && self.menu_policy.in_window_shortcuts_owned()
             && dialog_menu_shortcuts_allowed(
                 self.ime_active,
                 self.title_view.ime_active,
@@ -630,6 +717,8 @@ impl ScriptCraftApp {
             || raw.viewports.get(&raw.viewport_id).is_some_and(|viewport| viewport.focused == Some(false))
             || availability.replacement_pending || availability.modal_blocked
             || availability.native_output_active
+            || availability.story_map_target_dialog_open
+            || availability.story_map_context_menu_open
             || (self.menu_policy.in_window_shortcuts_owned() && menu::in_window_menu_popup_open(ctx));
         if blocked {
             self.wheel_zoom.reset();
@@ -963,6 +1052,8 @@ impl ScriptCraftApp {
             measure_root_other_bucket(self, app::responsiveness::RootOtherBucket::Host, |app| {
                 app.script_note_workspace.reset_document_activation();
                 app.close_title_page_window(&ctx);
+                app.story_map_target_dialog.reset();
+                app.story_map_context_menu.close();
                 if app.timer_popup_surface == EditorSurface::Body {
                     app.finalize_sprint_timer_popup(&ctx);
                 }
@@ -996,6 +1087,17 @@ impl ScriptCraftApp {
             &ctx,
             &mut self.script_note_workspace,
         );
+        let target_dialog_action = crate::views::story_map::target_dialog::show(self, &ctx);
+        if let Some(action) = target_dialog_action {
+            match action {
+                crate::views::story_map::target_dialog::TargetDialogAction::Cancel => {
+                    crate::views::story_map::target_dialog::cancel(self);
+                }
+                crate::views::story_map::target_dialog::TargetDialogAction::Apply(draft) => {
+                    crate::views::story_map::target_dialog::apply(self, &ctx, draft);
+                }
+            }
+        }
         let property_action = self.script_note_workspace.open_note.as_ref()
             .and_then(|note_id| self.session.project().script_notes().get(note_id).cloned())
             .map(|note| {

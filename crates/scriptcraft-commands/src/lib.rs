@@ -17,6 +17,7 @@ pub use values::{
     BeatCardIdValue, BeatPointValue, BeatRectValue, BeatSelectionValue, BeatTextFieldValue,
     BeatTextPositionValue, BeatTextEditValue, BeatNavigationValue,
     StoryMapLaneIdValue, StoryMapStartEighthsValue, StoryMapLengthEighthsValue,
+    StoryMapTargetPagesValue,
     InvalidStoryMapLaneId,
     ScriptNoteIdValue, ScriptNoteColorValue, ScriptNoteTimestampValue,
     ScriptNoteCreateValue, ScriptNotePropertiesValue, ScriptNoteTextPositionValue,

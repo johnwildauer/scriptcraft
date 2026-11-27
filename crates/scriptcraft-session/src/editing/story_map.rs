@@ -1,8 +1,8 @@
 //! Detached, UI-independent Story Map placement planning and publication.
 
 use scriptcraft_model::{
-    BeatCard, Project, StableId, StoryMapPlacement,
-    MAX_STORY_MAP_LANES, MAX_STORY_MAP_TARGET_PAGES,
+    BeatCard, Project, StableId, StoryMap, StoryMapPlacement,
+    MAX_STORY_MAP_LANES, MAX_STORY_MAP_TARGET_PAGES, STORY_MAP_EIGHTHS_PER_PAGE,
 };
 
 use super::{EditError, EditingSession};
@@ -60,6 +60,21 @@ pub enum StoryMapPlacementOutcome {
     Changed,
     NoOp,
     Rejected(StoryMapPlacementRejection),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoryMapTargetRejection {
+    InvalidSourceProject,
+    InvalidTargetPages,
+    InvalidPlacement,
+    TargetExceeded { minimum_pages: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoryMapTargetOutcome {
+    Changed,
+    NoOp,
+    Rejected(StoryMapTargetRejection),
 }
 
 #[derive(Clone)]
@@ -312,6 +327,76 @@ impl EditingSession {
         }
         self.publish_beat(plan.candidate, self.beat_selection.clone())?;
         Ok(StoryMapPlacementOutcome::Changed)
+    }
+
+    /// Changes only the Story Map target and publishes one detached candidate
+    /// through the existing Beat snapshot boundary, preserving Beat selection.
+    pub fn set_story_map_target_pages(
+        &mut self,
+        target_pages: u32,
+    ) -> Result<StoryMapTargetOutcome, EditError> {
+        let project = self.project();
+        if project.validate().is_err() {
+            return Ok(StoryMapTargetOutcome::Rejected(
+                StoryMapTargetRejection::InvalidSourceProject,
+            ));
+        }
+        if !(1..=MAX_STORY_MAP_TARGET_PAGES).contains(&target_pages) {
+            return Ok(StoryMapTargetOutcome::Rejected(
+                StoryMapTargetRejection::InvalidTargetPages,
+            ));
+        }
+        if project.story_map().target_pages == target_pages {
+            return Ok(StoryMapTargetOutcome::NoOp);
+        }
+
+        let Some(target_eighths) = u64::from(target_pages)
+            .checked_mul(STORY_MAP_EIGHTHS_PER_PAGE)
+        else {
+            return Ok(StoryMapTargetOutcome::Rejected(
+                StoryMapTargetRejection::InvalidTargetPages,
+            ));
+        };
+        let mut maximum_end_eighths = 0_u64;
+        for card in &project.beat_board().cards {
+            if let Some(placement) = &card.story_map_placement {
+                let Some(end_eighths) = placement.checked_end_eighths() else {
+                    return Ok(StoryMapTargetOutcome::Rejected(
+                        StoryMapTargetRejection::InvalidPlacement,
+                    ));
+                };
+                maximum_end_eighths = maximum_end_eighths.max(end_eighths);
+            }
+        }
+        if maximum_end_eighths > target_eighths {
+            let Some(minimum_pages) = maximum_end_eighths
+                .checked_div(STORY_MAP_EIGHTHS_PER_PAGE)
+                .and_then(|pages| {
+                    if maximum_end_eighths % STORY_MAP_EIGHTHS_PER_PAGE != 0 {
+                        pages.checked_add(1)
+                    } else {
+                        Some(pages)
+                    }
+                })
+                .and_then(|pages| u32::try_from(pages).ok())
+            else {
+                return Ok(StoryMapTargetOutcome::Rejected(
+                    StoryMapTargetRejection::InvalidPlacement,
+                ));
+            };
+            return Ok(StoryMapTargetOutcome::Rejected(
+                StoryMapTargetRejection::TargetExceeded { minimum_pages },
+            ));
+        }
+
+        let mut candidate = project.clone();
+        let mut story_map: StoryMap = candidate.story_map().clone();
+        story_map.target_pages = target_pages;
+        candidate
+            .replace_story_map(story_map)
+            .map_err(EditError::Model)?;
+        self.publish_beat(candidate, self.beat_selection.clone())?;
+        Ok(StoryMapTargetOutcome::Changed)
     }
 }
 

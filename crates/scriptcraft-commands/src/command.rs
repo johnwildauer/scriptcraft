@@ -12,6 +12,7 @@ use super::{
     BeatTextEditValue, BeatNavigationValue,
     ScriptNoteTimestampValue,
     StoryMapLaneIdValue, StoryMapStartEighthsValue, StoryMapLengthEighthsValue,
+    StoryMapTargetPagesValue,
 };
 
 /// Stable identifier for a command. Identifiers are intentionally independent
@@ -109,11 +110,12 @@ pub enum CommandId {
     EditorDialogueAltNavigate,
     ViewOutlineEditorToggle,
     StoryMapBeatPlacementSet,
+    StoryMapTargetSet,
 }
 
 impl CommandId {
     /// All IDs in descriptor-catalog order.
-    pub const ALL: [Self; 91] = [
+    pub const ALL: [Self; 92] = [
         Self::FileNew,
         Self::FileOpenRequest,
         Self::FileOpen,
@@ -205,6 +207,7 @@ impl CommandId {
         Self::EditorDialogueAltNavigate,
         Self::ViewOutlineEditorToggle,
         Self::StoryMapBeatPlacementSet,
+        Self::StoryMapTargetSet,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -300,6 +303,7 @@ impl CommandId {
             Self::EditorDialogueAltNavigate => "editor.dialogue-alt.navigate",
             Self::ViewOutlineEditorToggle => "view.outline-editor.toggle",
             Self::StoryMapBeatPlacementSet => "story-map.beat.placement.set",
+            Self::StoryMapTargetSet => "story-map.target.set",
         }
     }
 }
@@ -594,6 +598,8 @@ pub enum Command {
         start_eighths: StoryMapStartEighthsValue,
         length_eighths: StoryMapLengthEighthsValue,
     },
+    #[serde(rename = "story-map.target.set")]
+    StoryMapTargetSet { target_pages: StoryMapTargetPagesValue },
 }
 
 impl Command {
@@ -718,6 +724,7 @@ impl Command {
             Self::EditorDialogueAltNavigate { .. } => CommandId::EditorDialogueAltNavigate,
             Self::ViewOutlineEditorToggle => CommandId::ViewOutlineEditorToggle,
             Self::StoryMapBeatPlacementSet { .. } => CommandId::StoryMapBeatPlacementSet,
+            Self::StoryMapTargetSet { .. } => CommandId::StoryMapTargetSet,
         }
     }
 }

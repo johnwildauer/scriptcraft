@@ -7,6 +7,7 @@ use scriptcraft_model::{Position as CorePosition, Selection as CoreSelection};
 use scriptcraft_session::editing::{
     ApplyTemplateError, ApplyTemplateOutcome, BeatSelection, BeatTextField, EditError, EditingSession,
     ScriptNoteColorUpdate, ScriptNoteCreationInput, ScriptNoteField, ScriptNoteSelection,
+    StoryMapTargetOutcome, StoryMapTargetRejection,
 };
 
 use crate::{Command, CommandId, EditorSurface, PointerPhase, PositionError, SelectionError};
@@ -40,6 +41,7 @@ pub enum CommandRejection {
     PositionOutOfRange(PositionError),
     InvalidScriptNoteValue,
     InvalidStoryMapPlacement,
+    InvalidStoryMapTarget,
 }
 
 /// Executes with the legacy Body target for generic surface-less commands.
@@ -151,6 +153,20 @@ pub fn execute_editor_command_on_surface(
                 }
                 _ => CommandOutcome::Rejected(CommandRejection::InvalidStoryMapPlacement),
             },
+            Err(error) => CommandOutcome::Failed(error),
+        };
+    }
+
+    if let Command::StoryMapTargetSet { target_pages } = command {
+        return match session.set_story_map_target_pages(target_pages.get()) {
+            Ok(StoryMapTargetOutcome::Changed) => CommandOutcome::Changed,
+            Ok(StoryMapTargetOutcome::NoOp) => CommandOutcome::NoOp,
+            Ok(StoryMapTargetOutcome::Rejected(
+                StoryMapTargetRejection::InvalidSourceProject
+                | StoryMapTargetRejection::InvalidTargetPages
+                | StoryMapTargetRejection::InvalidPlacement
+                | StoryMapTargetRejection::TargetExceeded { .. },
+            )) => CommandOutcome::Rejected(CommandRejection::InvalidStoryMapTarget),
             Err(error) => CommandOutcome::Failed(error),
         };
     }

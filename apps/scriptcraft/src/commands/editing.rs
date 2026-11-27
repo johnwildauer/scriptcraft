@@ -87,6 +87,7 @@ impl ScriptCraftApp {
                 | Command::BeatBoardTextEdit { .. } | Command::BeatBoardNavigation { .. }
                 | Command::BeatBoardCardDelete { .. }
                 | Command::StoryMapBeatPlacementSet { .. }
+                | Command::StoryMapTargetSet { .. }
                 | Command::BeatBoardStyleToggle { .. } | Command::BeatBoardStyleClear
                 | Command::BeatBoardRunFormattingSet { .. }) =>
                 self.execute_editor(&command, RevealIntent::None, ctx),
@@ -301,7 +302,8 @@ impl ScriptCraftApp {
             | Command::BeatBoardTextEdit { .. } | Command::BeatBoardNavigation { .. }
             | Command::BeatBoardStyleToggle { .. } | Command::BeatBoardStyleClear
             | Command::BeatBoardRunFormattingSet { .. }
-            | Command::StoryMapBeatPlacementSet { .. });
+            | Command::StoryMapBeatPlacementSet { .. }
+            | Command::StoryMapTargetSet { .. });
         if self.development_mode {
             self.session.begin_mutation_diagnostics();
         }

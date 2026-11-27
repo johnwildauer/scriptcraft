@@ -106,7 +106,7 @@ fn navigation_track(strip: &StripGeometry, slider: Rect) -> Option<Rect> {
 
 fn slider_rect(strip: &StripGeometry) -> Option<Rect> {
     let row = strip.scrollbar_row;
-    let right = strip.timeline_viewport.right();
+    let right = strip.timeline_viewport.right() - STORY_MAP_SLIDER_TRAILING_PADDING;
     let left = (right - STORY_MAP_SLIDER_WIDTH).max(strip.timeline_viewport.left());
     if !right.is_finite() || !left.is_finite() || right <= left || !row.is_positive() {
         return None;

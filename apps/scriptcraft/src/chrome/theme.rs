@@ -368,6 +368,20 @@ impl ApplicationPalette {
             ResolvedAppearance::Night => Color32::from_rgb(70, 70, 70),
             ResolvedAppearance::Midnight => Color32::from_rgb(60, 60, 60),
         };
+        let (story_map_lane_background, story_map_separator) = match appearance {
+            ResolvedAppearance::Day => (
+                Color32::from_rgb(245, 245, 245),
+                Color32::from_rgb(250, 250, 250),
+            ),
+            ResolvedAppearance::Night => (
+                Color32::from_rgb(42, 42, 42),
+                Color32::from_rgb(48, 48, 48),
+            ),
+            ResolvedAppearance::Midnight => (
+                Color32::from_rgb(20, 20, 20),
+                Color32::from_rgb(23, 23, 23),
+            ),
+        };
         let feedback = FeedbackPalette {
             warning: visuals.warn_fg_color,
             error: visuals.error_fg_color,
@@ -399,11 +413,11 @@ impl ApplicationPalette {
             },
             story_map: StoryMapPalette {
                 strip_background: workspace_background,
-                lane_background: visuals.faint_bg_color,
+                lane_background: story_map_lane_background,
                 label_background: workspace_background,
                 label_foreground: page.text,
                 text_foreground: page.text,
-                separator: page.paper,
+                separator: story_map_separator,
                 ruler_mark: page.subdued_text,
                 overflow_ruler_mark: feedback.error,
                 beat_fill: page.paper,

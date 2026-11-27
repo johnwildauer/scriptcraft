@@ -420,6 +420,7 @@ impl ScriptCraftApp {
             | Command::BeatBoardCardGeometrySet { .. }
             | Command::BeatBoardCardDelete { .. }
             | Command::StoryMapBeatPlacementSet { .. }
+            | Command::StoryMapTargetSet { .. }
             | Command::BeatBoardSelectionSet { .. }
             | Command::BeatBoardTextEdit { .. }
             | Command::BeatBoardNavigation { .. }

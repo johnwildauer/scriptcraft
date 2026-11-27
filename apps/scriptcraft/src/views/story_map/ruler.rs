@@ -160,7 +160,10 @@ fn paint_labels(
             && page_position < timeline.domain_pages
             && show_page(density, page)
         {
-            if let Some(x) = timeline.page_to_screen(page_position) {
+            if let Some(tick_x) = timeline
+                .page_to_screen(page_position)
+                .and_then(|x| snap_to_device_pixel_center(x, pixels_per_point))
+            {
                 let label = page.to_string();
                 let color = if page_position >= timeline.target_pages {
                     palette.overflow_ruler_mark
@@ -169,7 +172,12 @@ fn paint_labels(
                 };
                 let galley = painter.layout_no_wrap(label, font.clone(), color);
                 let size = galley.size();
-                let left = x + f64::from(RULER_LABEL_INSET);
+                let tick_x = f64::from(tick_x);
+                let left = if page_start == 0 {
+                    tick_x + f64::from(RULER_LABEL_INSET)
+                } else {
+                    tick_x - f64::from(size.x) * 0.5
+                };
                 let right = left + f64::from(size.x);
                 let top = clip.top() + RULER_LABEL_TOP_INSET;
                 let bottom = top + size.y;

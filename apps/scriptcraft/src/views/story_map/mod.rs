@@ -1,4 +1,5 @@
 mod constants;
+pub(crate) mod context_menu;
 pub(crate) mod geometry;
 mod interaction;
 mod paint;
@@ -9,6 +10,7 @@ mod ruler;
 mod scrollbar;
 mod script_track;
 mod style;
+pub(crate) mod target_dialog;
 mod viewport;
 
 use eframe::egui::{self, Pos2, Sense, Vec2};
@@ -78,6 +80,7 @@ impl ScriptCraftApp {
             constants::PROJECTION_QUIET_DELAY,
         );
         if !visible {
+            self.story_map_context_menu.close();
             self.beat_drag_coordinator.cancel_external_if_hidden();
             self.story_map_resize.reset();
             self.story_map_navigation.reset();
@@ -93,6 +96,7 @@ impl ScriptCraftApp {
             || available.x <= 0.0
             || available.y <= 0.0
         {
+            self.story_map_context_menu.close();
             self.story_map_resize.reset();
             self.story_map_navigation.reset();
             let primary_down = ui.ctx().input(|input| input.pointer.primary_down());
@@ -121,6 +125,7 @@ impl ScriptCraftApp {
 
         let strip_height = self.story_map_view_state.height() as f32;
         if !strip_height.is_finite() || strip_height <= 0.0 {
+            self.story_map_context_menu.close();
             self.story_map_resize.reset();
             self.story_map_preview.close();
             let primary_down = ui.ctx().input(|input| input.pointer.primary_down());
@@ -137,6 +142,7 @@ impl ScriptCraftApp {
             lane_count,
             STORY_MAP_SCROLLBAR_ROW_HEIGHT,
         ) else {
+            self.story_map_context_menu.close();
             self.story_map_resize.reset();
             self.story_map_navigation.reset();
             let primary_down = ui.ctx().input(|input| input.pointer.primary_down());
@@ -145,6 +151,23 @@ impl ScriptCraftApp {
             self.story_map_preview.close();
             return StoryMapInteraction::default();
         };
+
+        let (secondary_released, pointer_position) = ui.ctx().input(|input| {
+            (
+                input.pointer.button_released(egui::PointerButton::Secondary),
+                input.pointer.interact_pos(),
+            )
+        });
+        if secondary_released
+            && pointer_position.is_some_and(|point| geometry.rect.contains(point))
+            && !self.story_map_preview_input_blocked(ui.ctx())
+        {
+            if let Some(anchor) = pointer_position {
+                self.story_map_context_menu.open_at(anchor);
+                self.story_map_preview.close();
+                ui.ctx().request_repaint();
+            }
+        }
 
         self.refresh_story_map_projection(ui);
 
@@ -230,6 +253,15 @@ impl ScriptCraftApp {
             self.prepared_document_fonts.as_ref(),
             palette,
         );
+        if let Some(response) = paint::paint_target_length_button(
+            ui,
+            &geometry,
+            palette.story_map,
+        ) {
+            if response.clicked() && !self.story_map_preview_input_blocked(ui.ctx()) {
+                let _ = target_dialog::open(self, ui.ctx(), response.rect.center());
+            }
+        }
         let mut scene_clicked = false;
         let mut pointer_on_scene_press = false;
         if interaction_area_usable {
@@ -360,6 +392,12 @@ impl ScriptCraftApp {
             self.story_map_beat_interaction.cancel_for_unavailable_geometry(primary_down, &mut self.beat_drag_coordinator);
             self.story_map_preview.close();
         }
+        paint::paint_lane_foreground_and_divider(
+            ui,
+            &geometry,
+            f64::from(ui.ctx().pixels_per_point()),
+            palette.story_map,
+        );
         StoryMapInteraction { scene_clicked, pointer_on_scene_press }
     }
 
@@ -372,6 +410,8 @@ impl ScriptCraftApp {
             || self.title_page_window_open
             || self.script_note_workspace.open_note.is_some()
             || self.script_note_workspace.new_type_dialog_open
+            || self.story_map_target_dialog.owns_input()
+            || self.story_map_context_menu.open
             || self.sprint_timer.popup_open
             || (self.menu_policy.in_window_shortcuts_owned()
                 && crate::chrome::menu::in_window_menu_popup_open(ctx))

@@ -9,7 +9,8 @@ use super::{
     constants::{
         LANE_LABEL_INSET, RULER_STROKE_DEVICE_PIXELS, STATIC_BEAT_CORNER_RADIUS,
         STATIC_BEAT_HORIZONTAL_INSET, STORY_MAP_BEAT_GHOST_BORDER_WIDTH,
-        STORY_MAP_BEAT_GHOST_CORNER_RADIUS,
+        STORY_MAP_BEAT_GHOST_CORNER_RADIUS, STORY_MAP_TARGET_ICON_SIZE,
+        STORY_MAP_TARGET_ICON_WIDTH,
     },
     geometry::{interval_intersects_visible_range, placed_beat_rect, StripGeometry, TimelineGeometry},
     interaction::{BeatGroupRole, BeatInteractionOutput},
@@ -47,7 +48,6 @@ pub(crate) fn paint_shell(
             palette.script_workspace.page,
         );
         paint_label(ui, label_cell, &lane.label, resolved.font, resolved.color);
-        paint_row_separator(ui, *row, story_palette.separator);
     }
     paint_row_separator(ui, geometry.ruler_row, story_palette.separator);
     let script_label_cell = geometry.rect.intersect(Rect::from_min_max(
@@ -78,6 +78,57 @@ pub(crate) fn paint_shell(
             Stroke::new(1.0, story_palette.separator),
         );
     }
+}
+
+pub(crate) fn paint_lane_foreground_and_divider(
+    ui: &egui::Ui,
+    strip: &StripGeometry,
+    pixels_per_point: f64,
+    palette: StoryMapPalette,
+) {
+    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return;
+    }
+    let clip = strip.rect.intersect(ui.clip_rect());
+    if !clip.is_positive() {
+        return;
+    }
+    let stroke_width = (RULER_STROKE_DEVICE_PIXELS / pixels_per_point) as f32;
+    if !stroke_width.is_finite() || stroke_width <= 0.0 {
+        return;
+    }
+
+    let painter = ui.painter().with_clip_rect(clip);
+    for row in &strip.lane_rows {
+        let row_clip = row.intersect(clip);
+        if !row_clip.is_positive() {
+            continue;
+        }
+        let Some(y) = snap_to_device_pixel_center(f64::from(row.bottom()), pixels_per_point) else {
+            continue;
+        };
+        if y < row_clip.top() || y > row_clip.bottom() {
+            continue;
+        }
+        painter.line_segment(
+            [Pos2::new(row_clip.left(), y), Pos2::new(row_clip.right(), y)],
+            Stroke::new(stroke_width, palette.separator),
+        );
+    }
+
+    let Some(x) = snap_to_device_pixel_center(
+        f64::from(strip.label_column.right()),
+        pixels_per_point,
+    ) else {
+        return;
+    };
+    if x < clip.left() || x > clip.right() {
+        return;
+    }
+    painter.line_segment(
+        [Pos2::new(x, clip.top()), Pos2::new(x, clip.bottom())],
+        Stroke::new(stroke_width, palette.separator),
+    );
 }
 
 pub(crate) fn paint_dynamic_lane_grid(
@@ -202,7 +253,7 @@ pub(crate) fn paint_static_beats(
         }
         visible.rect_filled(block, STATIC_BEAT_CORNER_RADIUS, palette.beat_fill);
         let resolved = style::resolve_lane_style(project, lane, prepared_fonts, page_palette);
-        paint_static_title(ui, block, &card.title, resolved.font, resolved.color);
+        paint_static_title(ui, block, &card.title, resolved.font, palette.beat_title);
     }
 }
 
@@ -362,6 +413,55 @@ pub(crate) fn paint_zoom_slider_knob(
         foreground,
         Stroke::new(visuals.fg_stroke.width, foreground),
     );
+}
+
+pub(crate) fn paint_target_length_button(
+    ui: &mut egui::Ui,
+    geometry: &StripGeometry,
+    palette: StoryMapPalette,
+) -> Option<egui::Response> {
+    let cell = geometry.label_column.intersect(geometry.ruler_row).intersect(ui.clip_rect());
+    if !cell.is_positive() {
+        return None;
+    }
+    let size = Vec2::new(STORY_MAP_TARGET_ICON_WIDTH.min(cell.width()), cell.height());
+    if !size.x.is_finite() || !size.y.is_finite() || size.x <= 0.0 || size.y <= 0.0 {
+        return None;
+    }
+    let rect = Rect::from_center_size(cell.center(), size).intersect(cell);
+    if !rect.is_positive() {
+        return None;
+    }
+    let response = ui.scope(|ui| {
+        let widgets = &mut ui.style_mut().visuals.widgets;
+        widgets.inactive.fg_stroke.color = palette.ruler_mark;
+        widgets.hovered.fg_stroke.color = palette.text_foreground;
+        widgets.active.fg_stroke.color = palette.text_foreground;
+        widgets.open.fg_stroke.color = palette.text_foreground;
+        ui.put(
+            rect,
+            egui::Button::new(
+                crate::presentation::material_font::rich_text(
+                    egui_material_icons::icons::ICON_STRAIGHTEN.outlined(),
+                    None,
+                )
+                .size(STORY_MAP_TARGET_ICON_SIZE),
+            )
+            .frame(false)
+            .min_size(size),
+        )
+    })
+    .inner
+    .on_hover_text("Change Target Script Length")
+    .on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            true,
+            "Change Target Script Length",
+        )
+    });
+    Some(response)
 }
 
 fn paint_label(ui: &egui::Ui, cell: Rect, label: &str, font: FontId, color: Color32) {

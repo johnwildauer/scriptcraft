@@ -31,7 +31,7 @@ const fn descriptor(
 }
 
 /// Authoritative discovery catalog; disabled placeholders are deliberately absent.
-pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 91] = [
+pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 92] = [
     descriptor(CommandId::FileNew, "file", "none"),
     descriptor(CommandId::FileOpenRequest, "file", "none"),
     descriptor(CommandId::FileOpen, "file", "path: document_path"),
@@ -274,6 +274,11 @@ pub static COMMAND_DESCRIPTORS: [CommandDescriptor; 91] = [
         CommandId::StoryMapBeatPlacementSet,
         "story-map",
         "card: stable card ID, lane_uuid: durable lane UUID, start_eighths: 0..=80000, length_eighths: 1..=80000",
+    ),
+    descriptor(
+        CommandId::StoryMapTargetSet,
+        "story-map",
+        "target_pages: whole pages, 1..=10000",
     ),
 ];
 

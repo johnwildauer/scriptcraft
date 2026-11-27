@@ -657,6 +657,8 @@ impl ScriptCraftApp {
         self.beat_drag_coordinator.reset();
         self.story_map_projection.reset_document();
         self.story_map_preview.close();
+        self.story_map_target_dialog.reset();
+        self.story_map_context_menu.close();
         self.beat_pinch_zoom_percent = f64::from(beat_board_view_state.zoom_milli_percent()) / 1000.0;
         self.beat_viewport = None;
         self.beat_interaction.cancel();

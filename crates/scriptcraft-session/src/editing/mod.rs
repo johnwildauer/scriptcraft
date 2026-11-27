@@ -33,7 +33,8 @@ mod story_map;
 pub use story_map::{
     plan_story_map_placement, StoryMapAffectedPlacement, StoryMapPlacementChangeKind,
     StoryMapPlacementOutcome, StoryMapPlacementPlan, StoryMapPlacementPlanError,
-    StoryMapPlacementRequest, StoryMapPlacementRejection,
+    StoryMapPlacementRequest, StoryMapPlacementRejection, StoryMapTargetOutcome,
+    StoryMapTargetRejection,
 };
 mod candidate;
 mod dialogue_alts;

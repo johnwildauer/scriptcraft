@@ -117,6 +117,34 @@ impl<'de> Deserialize<'de> for StoryMapLengthEighthsValue {
     }
 }
 
+/// Positive whole-page Story Map target bounded by the model's supported maximum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct StoryMapTargetPagesValue(u32);
+
+impl StoryMapTargetPagesValue {
+    pub const fn new(value: u32) -> Option<Self> {
+        if value > 0 && value <= scriptcraft_model::MAX_STORY_MAP_TARGET_PAGES {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for StoryMapTargetPagesValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u32::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| {
+            de::Error::custom("Story Map target pages must be positive and within the supported target bound")
+        })
+    }
+}
+
 /// Stable ScriptNote identity accepted by the command wire format.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScriptNoteIdValue(scriptcraft_model::StableId);

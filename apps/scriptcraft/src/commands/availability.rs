@@ -6,6 +6,8 @@ use scriptcraft_commands::{BuiltinTemplateValue, CommandId, EditorSurface};
 pub(crate) struct AppCommandAvailability {
     pub(crate) modal_blocked: bool,
     pub(crate) native_output_active: bool,
+    pub(crate) story_map_target_dialog_open: bool,
+    pub(crate) story_map_context_menu_open: bool,
     pub(crate) invisibles_visible: bool,
     pub(crate) ruler_visible: bool,
     pub(crate) story_map_visible: bool,
@@ -81,6 +83,8 @@ struct AppCommandProjectionKey {
     title_viewport_unsupported: bool,
     elements_viewport_unsupported: bool,
     selector_viewport_unsupported: bool,
+    story_map_target_dialog_open: bool,
+    story_map_context_menu_open: bool,
     script_note_open: bool,
     element_inspector_open: bool,
     template_selector_open: bool,
@@ -165,6 +169,8 @@ impl ScriptCraftApp {
             title_viewport_unsupported: self.title_viewport_unsupported,
             elements_viewport_unsupported: self.element_windows.elements_viewport_unsupported(),
             selector_viewport_unsupported: self.element_windows.selector_viewport_unsupported(),
+            story_map_target_dialog_open: self.story_map_target_dialog.owns_input(),
+            story_map_context_menu_open: self.story_map_context_menu.open,
             script_note_open: self.script_note_workspace.open_note.is_some(),
             element_inspector_open: self.element_windows.elements_open(),
             template_selector_open: self.element_windows.selector_open(),
@@ -454,6 +460,8 @@ impl ScriptCraftApp {
         AppCommandAvailability {
             modal_blocked: migration_pending && !replacement_pending,
             native_output_active,
+            story_map_target_dialog_open: self.story_map_target_dialog.owns_input(),
+            story_map_context_menu_open: self.story_map_context_menu.open,
             invisibles_visible: self.active_surface_invisibles_visible(),
             ruler_visible: self.settings_store.ruler_visible(),
             story_map_visible: self.settings_store.story_map_visible(),
@@ -577,6 +585,15 @@ impl AppCommandAvailability {
         if self.modal_blocked {
             return false;
         }
+        if self.story_map_target_dialog_open {
+            return matches!(
+                command,
+                CommandId::StoryMapTargetSet | CommandId::FileClose | CommandId::ApplicationQuit
+            );
+        }
+        if self.story_map_context_menu_open {
+            return matches!(command, CommandId::FileClose | CommandId::ApplicationQuit);
+        }
         if self.template_selector_open || self.element_inspector_open {
             return match command {
                 // Dialog presentation keeps only its own typed actions, harmless
@@ -600,6 +617,9 @@ impl AppCommandAvailability {
             | CommandId::BeatBoardTextEdit | CommandId::BeatBoardNavigation => self.beat_available,
             CommandId::BeatBoardCardDelete => self.beat_card_delete,
             CommandId::StoryMapBeatPlacementSet => self.story_map_placement,
+            // Target edits are root- and selection-independent; global modal,
+            // replacement, and native-output gates above still apply.
+            CommandId::StoryMapTargetSet => true,
             CommandId::BeatBoardStyleToggle | CommandId::BeatBoardStyleClear
             | CommandId::BeatBoardRunFormattingSet => self.beat_formatting,
             CommandId::ScriptNoteStyleToggle | CommandId::ScriptNoteStyleClear
