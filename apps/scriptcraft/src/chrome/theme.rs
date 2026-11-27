@@ -264,7 +264,7 @@ impl ApplicationPalette {
                 scrollbar_hovered: Color32::from_rgb(125, 125, 125),
             },
             ResolvedAppearance::Night => PagePalette {
-                paper: Color32::from_rgb(54, 54, 54),
+                paper: Color32::from_rgb(69, 69, 69),
                 text: Color32::from_rgb(238, 238, 238),
                 subdued_text: Color32::from_rgb(156, 163, 173),
                 border: Color32::from_rgb(10, 10, 10),
@@ -280,7 +280,7 @@ impl ApplicationPalette {
                 scrollbar_hovered: Color32::from_rgb(150, 150, 150),
             },
             ResolvedAppearance::Midnight => PagePalette {
-                paper: Color32::from_rgb(27, 27, 27),
+                paper: Color32::from_rgb(32, 32, 32),
                 text: Color32::from_rgb(238, 240, 244),
                 subdued_text: Color32::from_rgb(156, 163, 173),
                 border: Color32::from_rgb(20, 20, 20),
