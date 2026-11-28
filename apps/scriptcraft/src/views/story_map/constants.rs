@@ -1,7 +1,7 @@
 pub(crate) const LABEL_COLUMN_WIDTH: f32 = 90.0;
 pub(crate) const PAGE_RULER_ROW_HEIGHT: f32 = 24.0;
 pub(crate) const MIN_STRIP_HEIGHT: f32 = 90.0;
-pub(crate) const RESIZE_HIT_BAND_HEIGHT: f32 = 5.0;
+pub(crate) const RESIZE_HIT_BAND_HEIGHT: f32 = 2.0;
 pub(crate) const MAX_STRIP_HEIGHT: f32 = 1_000_000.0;
 
 pub(crate) const UN_SCALED_TARGET_WIDTH: f64 = 2_000.0;
