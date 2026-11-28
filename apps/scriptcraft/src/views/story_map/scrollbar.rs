@@ -133,7 +133,7 @@ fn fixed_origin(value: f64, maximum: f64) -> Option<BoardFixed> {
 }
 
 pub(crate) fn handle(
-    ui: &egui::Ui,
+    ui: &mut egui::Ui,
     strip: Rect,
     track: Rect,
     geometry: &TimelineGeometry,
@@ -164,13 +164,9 @@ pub(crate) fn handle(
     };
     let hover_pointer = finite(hover_pointer);
     let interact_pointer = finite(interact_pointer);
-    let capture_pointer = interact_pointer.or_else(|| finite(latest_pointer));
     let moved = !gone
         && moved_inside
         && hover_pointer.is_some_and(|position| state.last_pointer != Some(position));
-    if let Some(position) = capture_pointer.or(hover_pointer) {
-        state.last_pointer = Some(position);
-    }
     let thumb = thumb_geometry(geometry, track);
     if moved && thumb.is_some() {
         state.reveal(ctx, now);
@@ -185,6 +181,36 @@ pub(crate) fn handle(
         && (state.capture.is_some() || deadline_active || pointer_on_active_bar);
     if !state.visible {
         state.hovered = false;
+    }
+
+    let interaction_rect = track
+        .expand(STORY_MAP_SCROLLBAR_HIT_EXPANSION)
+        .intersect(strip);
+    let response = if state.visible && thumb.is_some() && interaction_rect.is_positive() {
+        Some(ui.interact(
+            interaction_rect,
+            ui.id().with("story-map-horizontal-scrollbar"),
+            egui::Sense::click_and_drag(),
+        ))
+    } else {
+        None
+    };
+    let response_pointer = response
+        .as_ref()
+        .and_then(egui::Response::interact_pointer_pos)
+        .and_then(|position| finite(Some(position)));
+    let response_primary_down = response
+        .as_ref()
+        .is_some_and(egui::Response::is_pointer_button_down_on);
+    let response_owns_primary = response_primary_down
+        || response.as_ref().is_some_and(|response| {
+            response.dragged_by(egui::PointerButton::Primary)
+        });
+    let capture_pointer = response_pointer
+        .or(interact_pointer)
+        .or_else(|| finite(latest_pointer));
+    if let Some(position) = capture_pointer.or(hover_pointer) {
+        state.last_pointer = Some(position);
     }
 
     let signature_changed = state.capture.is_some_and(|capture| {
@@ -229,11 +255,32 @@ pub(crate) fn handle(
     }
 
     if let Some(capture) = state.capture {
-        let drag_position = if down {
-            capture_pointer.or(state.last_pointer)
-        } else {
-            capture_pointer
-        };
+        if released || !down {
+            if let (Some(bar), Some(position)) = (thumb, capture_pointer) {
+                let offset = (position.x - bar.track.left() - capture.grab_offset)
+                    .clamp(0.0, bar.travel);
+                let origin = if bar.travel > 0.0 {
+                    f64::from(offset / bar.travel) * bar.max_origin
+                } else {
+                    0.0
+                };
+                if set_origin(view, geometry, origin) {
+                    state.observe_view(ctx, *view);
+                    ctx.request_repaint();
+                }
+            }
+            state.capture = None;
+            state.consumed_press = false;
+            state.hovered = false;
+            return true;
+        }
+        if !response_owns_primary {
+            state.capture = None;
+            state.consumed_press = true;
+            state.hovered = false;
+            return true;
+        }
+        let drag_position = capture_pointer.or(state.last_pointer);
         if let (Some(bar), Some(position)) = (thumb, drag_position) {
             let offset = (position.x - bar.track.left() - capture.grab_offset)
                 .clamp(0.0, bar.travel);
@@ -248,11 +295,6 @@ pub(crate) fn handle(
             }
         }
         ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-        if released || !down {
-            state.capture = None;
-            state.consumed_press = false;
-            state.hovered = false;
-        }
         return true;
     }
     if state.consumed_press {
@@ -267,14 +309,12 @@ pub(crate) fn handle(
     let Some(bar) = thumb else {
         return false;
     };
-    let Some(position) = hover_pointer else {
-        return false;
-    };
-    let hit = bar
-        .thumb
-        .expand(STORY_MAP_SCROLLBAR_HIT_EXPANSION)
-        .intersect(strip)
-        .contains(position);
+    let hit = hover_pointer.is_some_and(|position| {
+        bar.thumb
+            .expand(STORY_MAP_SCROLLBAR_HIT_EXPANSION)
+            .intersect(strip)
+            .contains(position)
+    });
     state.hovered = hit;
     if hit {
         ctx.set_cursor_icon(if pressed {
@@ -282,52 +322,64 @@ pub(crate) fn handle(
         } else {
             egui::CursorIcon::Grab
         });
-    } else if track
-        .expand(STORY_MAP_SCROLLBAR_HIT_EXPANSION)
-        .intersect(strip)
-        .contains(position)
-    {
+    } else if hover_pointer.is_some_and(|position| {
+        track
+            .expand(STORY_MAP_SCROLLBAR_HIT_EXPANSION)
+            .intersect(strip)
+            .contains(position)
+    }) {
         ctx.set_cursor_icon(egui::CursorIcon::Default);
     }
-    let track_hit = track
-        .expand(STORY_MAP_SCROLLBAR_HIT_EXPANSION)
-        .intersect(strip)
-        .contains(position);
-    if pressed && (hit || track_hit) {
-        let grab_offset = if hit {
-            position.x - bar.thumb.left()
-        } else {
-            bar.thumb.width() / 2.0
-        };
-        state.capture = Some(Capture {
-            grab_offset,
-            track_left: bar.track.left(),
-            track_top: bar.track.top(),
-            track_length: bar.track.width(),
-            thumb_length: bar.thumb.width(),
-            max_origin: bar.max_origin,
-            target_pages: geometry.target_pages,
-            domain_pages: geometry.domain_pages,
-            timeline_left: geometry.timeline_left,
-            viewport_width: geometry.viewport_width,
-            page_pitch: geometry.page_pitch,
-            zoom_percent: geometry.zoom_percent,
-        });
-        state.consumed_press = true;
-        if !hit {
-            let offset = (position.x - bar.track.left() - grab_offset).clamp(0.0, bar.travel);
-            let origin = if bar.travel > 0.0 {
-                f64::from(offset / bar.travel) * bar.max_origin
-            } else {
-                0.0
-            };
-            if set_origin(view, geometry, origin) {
-                state.observe_view(ctx, *view);
-                ctx.request_repaint();
+    if pressed && down && response_primary_down {
+        let activation_position = response_pointer
+            .or(interact_pointer)
+            .or_else(|| finite(latest_pointer))
+            .or(hover_pointer);
+        if let Some(position) = activation_position {
+            let hit = bar
+                .thumb
+                .expand(STORY_MAP_SCROLLBAR_HIT_EXPANSION)
+                .intersect(strip)
+                .contains(position);
+            let track_hit = interaction_rect.contains(position);
+            if hit || track_hit {
+                let grab_offset = if hit {
+                    position.x - bar.thumb.left()
+                } else {
+                    bar.thumb.width() / 2.0
+                };
+                state.capture = Some(Capture {
+                    grab_offset,
+                    track_left: bar.track.left(),
+                    track_top: bar.track.top(),
+                    track_length: bar.track.width(),
+                    thumb_length: bar.thumb.width(),
+                    max_origin: bar.max_origin,
+                    target_pages: geometry.target_pages,
+                    domain_pages: geometry.domain_pages,
+                    timeline_left: geometry.timeline_left,
+                    viewport_width: geometry.viewport_width,
+                    page_pitch: geometry.page_pitch,
+                    zoom_percent: geometry.zoom_percent,
+                });
+                state.consumed_press = true;
+                if !hit {
+                    let offset = (position.x - bar.track.left() - grab_offset)
+                        .clamp(0.0, bar.travel);
+                    let origin = if bar.travel > 0.0 {
+                        f64::from(offset / bar.travel) * bar.max_origin
+                    } else {
+                        0.0
+                    };
+                    if set_origin(view, geometry, origin) {
+                        state.observe_view(ctx, *view);
+                        ctx.request_repaint();
+                    }
+                }
+                ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                return true;
             }
         }
-        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-        return true;
     }
     false
 }

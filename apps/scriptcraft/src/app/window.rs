@@ -13,17 +13,65 @@ use scriptcraft_fdx as fdx;
 
 impl ScriptCraftApp {
     /// Immediate child viewports may enter their callback without the app-level
-    /// raw-input hook. Reuse the same title-viewport adapter and pinch route as
-    /// the hook; removing from both event collections keeps editor scrolling and
-    /// manual-scroll anchor cancellation from seeing a zoom gesture.
+    /// raw-input hook. This callback is the sole Title wheel/middle adapter and
+    /// runs only after the Title-local state has been swapped into the page frame.
     pub(crate) fn adapt_title_page_wheel_input(&mut self, ctx: &egui::Context) {
         let viewport_height_points = ctx.content_rect().height();
+        let events = ctx.input(|input| input.events.clone());
+        let mut pointer = ctx.input(|input| input.pointer.latest_pos());
+        let mut owners = Vec::new();
+        for event in &events {
+            match event {
+                egui::Event::PointerMoved(position)
+                | egui::Event::PointerButton { pos: position, .. } => {
+                    pointer = (position.x.is_finite() && position.y.is_finite())
+                        .then_some(*position);
+                }
+                egui::Event::PointerGone => pointer = None,
+                egui::Event::MouseWheel { .. }
+                    if self.title_auto_scroll_contains_route(ctx, pointer) =>
+                {
+                    self.cancel_title_auto_scroll();
+                }
+                _ => {}
+            }
+            if let egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Middle,
+                pressed: true,
+                ..
+            } = event
+            {
+                let active_exit = self.title_auto_scroll_owns_middle(ctx, None);
+                let eligible_point = (pos.x.is_finite() && pos.y.is_finite()).then_some(*pos);
+                let owner = if active_exit
+                    || eligible_point
+                        .is_some_and(|point| self.title_auto_scroll_owns_middle(ctx, Some(point)))
+                {
+                    Some(crate::presentation::auto_scroll::AutoScrollOwner::Body)
+                } else {
+                    None
+                };
+                owners.push(owner);
+            }
+        }
+        if owners.iter().any(Option::is_some) {
+            crate::presentation::auto_scroll::set_route_owner(
+                ctx,
+                Some(crate::presentation::auto_scroll::AutoScrollOwner::Body),
+            );
+        }
         let factors = ctx.input_mut(|input| {
             let previous_event_count = input.events.len();
+            let mut owners = owners.into_iter();
             let factors = self
                 .title_view
                 .wheel_zoom
-                .adapt_events(&mut input.events, viewport_height_points);
+                .adapt_events_filtered(
+                    &mut input.events,
+                    viewport_height_points,
+                    |_| owners.next().flatten(),
+                );
             let consumed_event = input.events.len() < previous_event_count;
             input.raw.events.clone_from(&input.events);
             if consumed_event && !zoom_scroll::has_nonzero_mouse_wheel(&input.raw.events) {
@@ -41,6 +89,7 @@ impl ScriptCraftApp {
             return;
         }
         self.reset_body_auto_scroll();
+        self.reset_title_auto_scroll();
         crate::presentation::auto_scroll::set_route_owner(ctx, None);
         if self.title_view_reset_pending {
             self.title_view = TitlePageViewState::default();
@@ -53,6 +102,7 @@ impl ScriptCraftApp {
 
     pub(crate) fn close_title_page_window(&mut self, ctx: &egui::Context) {
         self.reset_body_auto_scroll();
+        self.reset_title_auto_scroll();
         crate::presentation::auto_scroll::set_route_owner(ctx, None);
         if self.title_page_window_open {
             title_page::send_close(ctx);
@@ -132,6 +182,9 @@ impl ScriptCraftApp {
 impl ScriptCraftApp {
     pub(crate) fn set_title_page_window_open(&mut self, open: bool) {
         self.reset_body_auto_scroll();
+        if self.title_page_window_open != open {
+            self.reset_title_auto_scroll();
+        }
         self.title_page_window_open = open;
         if !open {
             self.title_view.wheel_zoom.reset();

@@ -66,6 +66,7 @@ struct BodyScrollSnapshot {
 
 #[derive(Debug, Clone)]
 struct BodyScrollCompatibility {
+    surface: EditorSurface,
     viewport: egui::ViewportId,
     root_view: crate::app::RootDocumentView,
     mode: ScriptViewMode,
@@ -84,7 +85,8 @@ struct BodyScrollCompatibility {
 
 impl BodyScrollCompatibility {
     fn compatible_with(&self, other: &Self) -> bool {
-        self.viewport == other.viewport
+        self.surface == other.surface
+            && self.viewport == other.viewport
             && self.root_view == other.root_view
             && self.mode == other.mode
             && self.scroll_area_id == other.scroll_area_id
@@ -317,12 +319,42 @@ fn paint_editor_scrollbar_handle<R>(
 }
 
 impl ScriptCraftApp {
+    fn page_auto_scroll(&self, surface: EditorSurface) -> &BodyAutoScrollState {
+        match surface {
+            EditorSurface::Body => &self.body_auto_scroll,
+            EditorSurface::TitlePage => &self.title_view.auto_scroll,
+        }
+    }
+
+    fn page_auto_scroll_mut(&mut self, surface: EditorSurface) -> &mut BodyAutoScrollState {
+        match surface {
+            EditorSurface::Body => &mut self.body_auto_scroll,
+            EditorSurface::TitlePage => &mut self.title_view.auto_scroll,
+        }
+    }
+
     pub(crate) fn reset_body_auto_scroll(&mut self) {
         self.body_auto_scroll.reset();
     }
 
     pub(crate) fn cancel_body_auto_scroll(&mut self) {
         self.body_auto_scroll.cancel_gesture();
+    }
+
+    pub(crate) fn reset_title_auto_scroll(&mut self) {
+        self.title_view.auto_scroll.reset();
+    }
+
+    pub(crate) fn cancel_title_auto_scroll(&mut self) {
+        self.title_view.auto_scroll.cancel_gesture();
+    }
+
+    fn reset_page_auto_scroll(&mut self, surface: EditorSurface) {
+        self.page_auto_scroll_mut(surface).reset();
+    }
+
+    fn cancel_page_auto_scroll(&mut self, surface: EditorSurface) {
+        self.page_auto_scroll_mut(surface).cancel_gesture();
     }
 
     pub(crate) fn body_auto_scroll_blocked(&self, ctx: &egui::Context) -> bool {
@@ -373,6 +405,26 @@ impl ScriptCraftApp {
         self.body_auto_scroll.owns_middle(point)
     }
 
+    pub(crate) fn title_auto_scroll_owns_middle(
+        &self,
+        ctx: &egui::Context,
+        point: Option<Pos2>,
+    ) -> bool {
+        if !self.title_view_state_swapped
+            || !self.page_auto_scroll_compatible(EditorSurface::TitlePage, ctx)
+        {
+            return false;
+        }
+        let state = &self.title_view.auto_scroll;
+        if !state.gesture.is_active()
+            && (self.pending_zoom_anchor.is_some()
+                || self.reveal_intent == super::RevealIntent::Conditional)
+        {
+            return false;
+        }
+        state.owns_middle(point)
+    }
+
     pub(crate) fn body_auto_scroll_contains_route(
         &self,
         ctx: &egui::Context,
@@ -384,16 +436,35 @@ impl ScriptCraftApp {
                 .is_some_and(|point| self.body_auto_scroll.contains_body_region(point))
     }
 
-    fn body_auto_scroll_compatible(&self, ctx: &egui::Context) -> bool {
-        if self.body_auto_scroll_blocked(ctx) {
+    pub(crate) fn title_auto_scroll_contains_route(
+        &self,
+        ctx: &egui::Context,
+        point: Option<Pos2>,
+    ) -> bool {
+        self.title_view_state_swapped
+            && self.page_auto_scroll_compatible(EditorSurface::TitlePage, ctx)
+            && point
+                .filter(|point| finite_pos(*point))
+                .is_some_and(|point| self.title_view.auto_scroll.contains_body_region(point))
+    }
+
+    fn page_auto_scroll_compatible(&self, surface: EditorSurface, ctx: &egui::Context) -> bool {
+        if self.page_auto_scroll_blocked(surface, ctx) {
             return false;
         }
-        let state = &self.body_auto_scroll;
+        let state = self.page_auto_scroll(surface);
+        let viewport = match surface {
+            EditorSurface::Body => egui::ViewportId::ROOT,
+            EditorSurface::TitlePage => crate::views::title_page::viewport_id(),
+        };
+        let zoom_percent = self.zoom_for_surface(surface);
         let compatible = state.compatibility.as_ref().is_some_and(|signature| {
-            signature.viewport == egui::ViewportId::ROOT
+            signature.surface == surface
+                && signature.viewport == viewport
                 && signature.root_view == self.root_document_view
-                && signature.mode == self.script_view_mode
-                && signature.zoom_percent == self.zoom_percent
+                && signature.mode
+                    == resolve_presentation_mode(surface, || self.script_view_mode)
+                && signature.zoom_percent == zoom_percent
                 && signature.pixels_per_point == ctx.pixels_per_point()
                 && signature.revision == self.session.revision()
                 && signature.activation_generation == self.script_note_workspace.reset_generation
@@ -404,6 +475,57 @@ impl ScriptCraftApp {
                 && signature.root_rect == ctx.content_rect()
         });
         compatible && state.publication.is_some() && state.actual.is_some()
+    }
+
+    fn body_auto_scroll_compatible(&self, ctx: &egui::Context) -> bool {
+        self.page_auto_scroll_compatible(EditorSurface::Body, ctx)
+    }
+
+    pub(crate) fn title_auto_scroll_blocked(&self, ctx: &egui::Context) -> bool {
+        #[cfg(target_os = "windows")]
+        let native_output_owner = self.native_output_modal_active
+            || self.windows_print_preparation.is_some()
+            || self.windows_print_session.is_some();
+        #[cfg(target_os = "macos")]
+        let native_output_owner =
+            self.native_output_modal_active || self.native_operation_coordinator.is_active();
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let native_output_owner = self.native_output_modal_active;
+        let title_focus = if self.title_view_state_swapped {
+            self.surface_focused
+        } else {
+            self.title_view.surface_focused
+        };
+        self.root_document_view != crate::app::RootDocumentView::Script
+            || self.active_editor_surface != EditorSurface::TitlePage
+            || !self.title_page_window_open
+            || self.title_viewport_unsupported
+            || !title_focus
+            || ctx.input(|input| {
+                input.viewport().focused != Some(true) || input.viewport().close_requested()
+            })
+            || self.element_windows.owns_input()
+            || self.pending_fdx_open.is_some()
+            || self.replacement_open_pending()
+            || self.script_note_workspace.open_note.is_some()
+            || self.script_note_workspace.new_type_dialog_open
+            || self.story_map_target_dialog.owns_input()
+            || self.story_map_context_menu.open
+            || self.sprint_timer.popup_open
+            || native_output_owner
+            || (self.menu_policy.in_window_shortcuts_owned()
+                && crate::chrome::menu::in_window_menu_popup_open(ctx))
+            || egui::Popup::is_any_open(ctx)
+    }
+
+    fn page_auto_scroll_blocked(&self, surface: EditorSurface, ctx: &egui::Context) -> bool {
+        match surface {
+            EditorSurface::Body => self.body_auto_scroll_blocked(ctx),
+            EditorSurface::TitlePage => {
+                self.title_auto_scroll_blocked(ctx)
+                    || (self.title_view_state_swapped && !self.surface_focused)
+            }
+        }
     }
 
     pub(crate) fn live_document_surface(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
@@ -424,9 +546,6 @@ impl ScriptCraftApp {
     }
 
     fn live_document_surface_inner(&mut self, ui: &mut egui::Ui, surface: EditorSurface) {
-        if surface != EditorSurface::Body {
-            self.body_auto_scroll.reset();
-        }
         if surface == EditorSurface::Body {
             self.script_note_workspace.marker_anchor = None;
         }
@@ -435,9 +554,7 @@ impl ScriptCraftApp {
         let layout = match self.layout_for_render(surface) {
             Ok(layout) => layout,
             Err(error) => {
-                if surface == EditorSurface::Body {
-                    self.body_auto_scroll.reset();
-                }
+                self.reset_page_auto_scroll(surface);
                 self.page_geometry.invalidate();
                 self.page_scale = None;
                 self.show_error(format!(
@@ -448,9 +565,7 @@ impl ScriptCraftApp {
             }
         };
         let Some(prepared_fonts) = self.prepared_document_fonts.clone() else {
-            if surface == EditorSurface::Body {
-                self.body_auto_scroll.reset();
-            }
+            self.reset_page_auto_scroll(surface);
             self.show_error(
                 "FONT_PREPARATION_FAILED: no prepared environment; document unchanged".to_owned(),
             );
@@ -462,9 +577,7 @@ impl ScriptCraftApp {
             .map_err(|_| ());
         match fonts_ready {
             Err(()) => {
-                if surface == EditorSurface::Body {
-                    self.body_auto_scroll.reset();
-                }
+                self.reset_page_auto_scroll(surface);
                 self.show_error(
                     "FONT_PREPARATION_FAILED: resolved face registration failed; document unchanged"
                         .to_owned(),
@@ -472,9 +585,7 @@ impl ScriptCraftApp {
                 return;
             }
             Ok(false) => {
-                if surface == EditorSurface::Body {
-                    self.body_auto_scroll.reset();
-                }
+                self.reset_page_auto_scroll(surface);
                 // add_font publishes at the next egui pass. Do not allow either
                 // editor surface to build a galley with a merely queued family.
                 self.page_geometry.invalidate();
@@ -543,8 +654,12 @@ impl ScriptCraftApp {
             layout.inputs.font_size as f32,
             self.zoom_percent,
         );
-        let body_compatibility = (surface == EditorSurface::Body).then(|| BodyScrollCompatibility {
-            viewport: egui::ViewportId::ROOT,
+        let page_compatibility = Some(BodyScrollCompatibility {
+            surface,
+            viewport: match surface {
+                EditorSurface::Body => egui::ViewportId::ROOT,
+                EditorSurface::TitlePage => crate::views::title_page::viewport_id(),
+            },
             root_view: self.root_document_view,
             mode: presentation_mode,
             scroll_area_id,
@@ -557,33 +672,31 @@ impl ScriptCraftApp {
             ),
             scale: current_metrics.scale,
             pixels_per_point: ui.ctx().pixels_per_point(),
-            zoom_percent: self.zoom_percent,
+            zoom_percent: self.zoom_for_surface(surface),
             revision: self.session.revision(),
             activation_generation: self.script_note_workspace.reset_generation,
             document_identity: self.session.project().layout_identity().clone(),
         });
-        let body_compatibility_changed = body_compatibility.as_ref().is_some_and(|current| {
-            self.body_auto_scroll
+        let page_compatibility_changed = page_compatibility.as_ref().is_some_and(|current| {
+            self.page_auto_scroll(surface)
                 .compatibility
                 .as_ref()
                 .is_some_and(|previous| !previous.compatible_with(current))
         });
-        if surface == EditorSurface::Body
-            && (body_compatibility_changed || self.body_auto_scroll_blocked(ui.ctx()))
+        if page_compatibility_changed || self.page_auto_scroll_blocked(surface, ui.ctx())
         {
-            self.body_auto_scroll.reset();
+            self.reset_page_auto_scroll(surface);
         }
-        let prior_actual_valid = self.body_auto_scroll.actual.is_some_and(|actual| {
+        let prior_actual_valid = self.page_auto_scroll(surface).actual.is_some_and(|actual| {
             finite_nonnegative_vec(actual.offset)
                 && finite_positive_rect_size(actual.inner_rect)
                 && finite_nonnegative_vec(actual.content_size)
         });
-        if surface == EditorSurface::Body && self.body_auto_scroll.actual.is_some() && !prior_actual_valid {
-            self.body_auto_scroll.reset();
+        if self.page_auto_scroll(surface).actual.is_some() && !prior_actual_valid {
+            self.reset_page_auto_scroll(surface);
         }
         let pointer = ui.ctx().input(|input| input.pointer.latest_pos());
-        let wheel_over_body = surface == EditorSurface::Body
-            && self.body_auto_scroll.publication.as_ref().is_some_and(|publication| {
+        let wheel_over_page = self.page_auto_scroll(surface).publication.as_ref().is_some_and(|publication| {
                 pointer.is_some_and(|point| {
                     publication
                         .interaction_rect
@@ -597,8 +710,7 @@ impl ScriptCraftApp {
                     .iter()
                     .any(|event| matches!(event, egui::Event::MouseWheel { .. }))
             });
-        let popup_or_overlay_press = surface == EditorSurface::Body
-            && ui.ctx().input(|input| {
+        let popup_or_overlay_press = ui.ctx().input(|input| {
                 input.events.iter().any(|event| match event {
                     egui::Event::PointerButton {
                         pos,
@@ -606,30 +718,30 @@ impl ScriptCraftApp {
                         pressed: true,
                         ..
                     } if *button == egui::PointerButton::Secondary
-                        && self.body_auto_scroll.contains_body_region(*pos) => true,
+                        && self.page_auto_scroll(surface).contains_body_region(*pos) => true,
                     egui::Event::PointerButton {
                         pos,
                         pressed: true,
                         ..
-                    } => self.body_auto_scroll.higher_priority_overlay_at(*pos),
+                    } => self.page_auto_scroll(surface).higher_priority_overlay_at(*pos),
                     _ => false,
                 })
             });
         let pending_manual_owner = element_windows_own_input
-            || wheel_over_body
+            || wheel_over_page
             || popup_or_overlay_press
             || ui.ctx().input(|input| input.viewport().close_requested())
-            || (surface == EditorSurface::Body
-                && (pending_zoom_anchor.is_some()
+            || (pending_zoom_anchor.is_some()
                     || reveal_intent == super::RevealIntent::Conditional
-                    || stock_scrollbar_owns_input(ui, scroll_area_id, self.body_auto_scroll.actual)));
-        if surface == EditorSurface::Body && pending_manual_owner {
-            self.body_auto_scroll.cancel_gesture();
+                    || stock_scrollbar_owns_input(ui, scroll_area_id, self.page_auto_scroll(surface).actual));
+        if pending_manual_owner {
+            self.cancel_page_auto_scroll(surface);
         }
-        let mut body_auto_frame = auto_scroll::GestureFrame::default();
-        if surface == EditorSurface::Body && !self.body_auto_scroll_blocked(ui.ctx()) {
-            let publication = self.body_auto_scroll.publication.clone();
-            body_auto_frame = self.body_auto_scroll.gesture.process_body_frame(
+        let page_auto_was_active = self.page_auto_scroll(surface).gesture.is_active();
+        let mut page_auto_frame = auto_scroll::GestureFrame::default();
+        if !self.page_auto_scroll_blocked(surface, ui.ctx()) {
+            let publication = self.page_auto_scroll(surface).publication.clone();
+            page_auto_frame = self.page_auto_scroll_mut(surface).gesture.process_body_frame(
                 ui.ctx(),
                 |point| {
                     publication
@@ -638,34 +750,33 @@ impl ScriptCraftApp {
                 },
             );
         }
-        let mut body_auto_request = None;
-        if surface == EditorSurface::Body
-            && body_auto_frame.active
+        let mut page_auto_request = None;
+        if page_auto_frame.active
             && !pending_manual_owner
-            && !body_compatibility_changed
+            && !page_compatibility_changed
         {
-            if let Some(actual) = self.body_auto_scroll.actual.filter(|_| prior_actual_valid) {
+            if let Some(actual) = self.page_auto_scroll(surface).actual.filter(|_| prior_actual_valid) {
                 let maximum = (actual.content_size - actual.inner_rect.size()).max(Vec2::ZERO);
-                let requested = actual.offset + body_auto_frame.delta;
+                let requested = actual.offset + page_auto_frame.delta;
                 if finite_nonnegative_vec(maximum)
                     && requested.x.is_finite()
                     && requested.y.is_finite()
                 {
                     let requested = requested.clamp(Vec2::ZERO, maximum);
                     if finite_nonnegative_vec(requested) {
-                        body_auto_request = Some(requested);
-                        self.body_auto_scroll.requested_offset = Some(requested);
+                        page_auto_request = Some(requested);
+                        self.page_auto_scroll_mut(surface).requested_offset = Some(requested);
                     } else {
-                        self.body_auto_scroll.reset();
-                        body_auto_frame = auto_scroll::GestureFrame::default();
+                        self.reset_page_auto_scroll(surface);
+                        page_auto_frame = auto_scroll::GestureFrame::default();
                     }
                 } else {
-                    self.body_auto_scroll.reset();
-                    body_auto_frame = auto_scroll::GestureFrame::default();
+                    self.reset_page_auto_scroll(surface);
+                    page_auto_frame = auto_scroll::GestureFrame::default();
                 }
-            } else if self.body_auto_scroll.gesture.is_active() {
-                self.body_auto_scroll.reset();
-                body_auto_frame = auto_scroll::GestureFrame::default();
+            } else if self.page_auto_scroll(surface).gesture.is_active() {
+                self.reset_page_auto_scroll(surface);
+                page_auto_frame = auto_scroll::GestureFrame::default();
             }
         }
         // Temporarily override the current surface Ui style; keep the shared
@@ -686,7 +797,7 @@ impl ScriptCraftApp {
         if let Some(offset) = zoom_compensation_offset {
             scroll_area = scroll_area.scroll_offset(offset);
         } else if reveal_intent != super::RevealIntent::Conditional {
-            if let Some(offset) = body_auto_request {
+            if let Some(offset) = page_auto_request {
                 scroll_area = scroll_area.scroll_offset(offset);
             }
         }
@@ -922,29 +1033,28 @@ impl ScriptCraftApp {
                 }
             }
         });
-        if surface == EditorSurface::Body {
-            let actual = BodyScrollSnapshot {
-                offset: scroll_output.state.offset,
-                inner_rect: scroll_output.inner_rect,
-                content_size: scroll_output.content_size,
-            };
-            let finite_actual = finite_nonnegative_vec(actual.offset)
-                && finite_positive_rect_size(actual.inner_rect)
-                && finite_nonnegative_vec(actual.content_size);
-            let _request_adjusted_by_scroll_area = self
-                .body_auto_scroll
-                .requested_offset
-                .is_some_and(|requested| requested != actual.offset);
-            self.body_auto_scroll.requested_offset = None;
-            if finite_actual
-                && !self.body_auto_scroll_blocked(ui.ctx())
-                && !body_compatibility_changed
-            {
-                self.body_auto_scroll.actual = Some(actual);
-                self.body_auto_scroll.compatibility = body_compatibility.clone();
-            } else {
-                self.body_auto_scroll.reset();
-            }
+        let actual = BodyScrollSnapshot {
+            offset: scroll_output.state.offset,
+            inner_rect: scroll_output.inner_rect,
+            content_size: scroll_output.content_size,
+        };
+        let finite_actual = finite_nonnegative_vec(actual.offset)
+            && finite_positive_rect_size(actual.inner_rect)
+            && finite_nonnegative_vec(actual.content_size);
+        let _request_adjusted_by_scroll_area = self
+            .page_auto_scroll(surface)
+            .requested_offset
+            .is_some_and(|requested| requested != actual.offset);
+        self.page_auto_scroll_mut(surface).requested_offset = None;
+        if finite_actual
+            && !self.page_auto_scroll_blocked(surface, ui.ctx())
+            && !page_compatibility_changed
+        {
+            let state = self.page_auto_scroll_mut(surface);
+            state.actual = Some(actual);
+            state.compatibility = page_compatibility.clone();
+        } else {
+            self.reset_page_auto_scroll(surface);
         }
         if let (Some(strip), Some(first_page)) = (ruler_rect, presented_pages.first()) {
             paint_ruler(
@@ -1061,6 +1171,7 @@ impl ScriptCraftApp {
                 surface,
                 &frame_note_markers,
                 &frame_alt_controls,
+                page_auto_frame.owned_input || page_auto_was_active,
             );
             if surface == EditorSurface::Body
                 && !secondary_on_note_marker
@@ -1086,32 +1197,34 @@ impl ScriptCraftApp {
         } else {
             self.native_input_diagnostics.focus_lock_installed = false;
         }
-        if surface == EditorSurface::Body {
-            let publication_valid = layout.purpose == scriptcraft_layout::LayoutPurpose::Editor
-                && geometry_count_matches
-                && self.body_auto_scroll.actual.is_some()
-                && body_compatibility.is_some()
-                && finite_positive_rect(editor_interaction_rect.intersect(actual_clip))
-                && !self.body_auto_scroll_blocked(ui.ctx());
-            if publication_valid {
-                self.body_auto_scroll.publication = Some(BodyAutoScrollPublication {
+        let publication_valid = layout.purpose == scriptcraft_layout::LayoutPurpose::Editor
+            && geometry_count_matches
+            && self.page_auto_scroll(surface).actual.is_some()
+            && page_compatibility.is_some()
+            && finite_positive_rect(editor_interaction_rect.intersect(actual_clip))
+            && !self.page_auto_scroll_blocked(surface, ui.ctx());
+        if publication_valid {
+            let paint_anchor = {
+                let state = self.page_auto_scroll_mut(surface);
+                state.publication = Some(BodyAutoScrollPublication {
                     interaction_rect: editor_interaction_rect,
                     clip: actual_clip,
                     note_markers: frame_note_markers,
                     alt_controls: frame_alt_controls,
                 });
-                if body_auto_frame.active && self.body_auto_scroll.gesture.is_active() {
-                    auto_scroll::paint_anchor(
-                        ui.painter(),
-                        actual_clip,
-                        self.body_auto_scroll.gesture.anchor(),
-                        self.theme_palette.script_workspace.page.subdued_text,
-                    );
-                    auto_scroll::set_active_cursor(ui.ctx(), true);
-                }
-            } else {
-                self.body_auto_scroll.reset();
+                page_auto_frame.active && state.gesture.is_active()
+            };
+            if paint_anchor {
+                auto_scroll::paint_anchor(
+                    ui.painter(),
+                    actual_clip,
+                    self.page_auto_scroll(surface).gesture.anchor(),
+                    self.theme_palette.script_workspace.page.subdued_text,
+                );
+                auto_scroll::set_active_cursor(ui.ctx(), true);
             }
+        } else {
+            self.reset_page_auto_scroll(surface);
         }
     }
 }

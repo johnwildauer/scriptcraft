@@ -132,29 +132,40 @@ impl ScriptCraftApp {
         surface: EditorSurface,
         note_markers: &[NoteMarkerGeometry],
         alt_controls: &[AltOverlayGeometry],
+        gesture_owned_middle: bool,
     ) {
         let pointer = response.interact_pointer_pos();
-        let body_middle_owned = surface == EditorSurface::Body
-            && (self.body_auto_scroll_owns_middle(ui.ctx(), None)
-                || (ui.input(|input| {
-                    input.pointer.button_down(egui::PointerButton::Middle)
-                        || input.events.iter().any(|event| {
-                            matches!(
-                                event,
-                                egui::Event::PointerButton {
-                                    button: egui::PointerButton::Middle,
-                                    ..
-                                }
-                            )
-                        })
-                }) && self.body_auto_scroll_owns_middle(ui.ctx(), pointer)));
-        match surface {
-            EditorSurface::Body => self.editor_surface_id = Some(editor_id),
-            EditorSurface::TitlePage => self.title_editor_surface_id = Some(editor_id),
+        let middle_owned = gesture_owned_middle || (match surface {
+            EditorSurface::Body => self.body_auto_scroll_owns_middle(ui.ctx(), None),
+            EditorSurface::TitlePage => self.title_auto_scroll_owns_middle(ui.ctx(), None),
+        })
+            || (ui.input(|input| {
+                input.pointer.button_down(egui::PointerButton::Middle)
+                    || input.events.iter().any(|event| {
+                        matches!(
+                            event,
+                            egui::Event::PointerButton {
+                                button: egui::PointerButton::Middle,
+                                ..
+                            }
+                        )
+                    })
+            })
+                && match surface {
+                    EditorSurface::Body => self.body_auto_scroll_owns_middle(ui.ctx(), pointer),
+                    EditorSurface::TitlePage => {
+                        self.title_auto_scroll_owns_middle(ui.ctx(), pointer)
+                    }
+                });
+        if !middle_owned {
+            match surface {
+                EditorSurface::Body => self.editor_surface_id = Some(editor_id),
+                EditorSurface::TitlePage => self.title_editor_surface_id = Some(editor_id),
+            }
+            self.editor_surface_rect = Some(response.rect);
         }
-        self.editor_surface_rect = Some(response.rect);
         let surface_focused = response.has_focus();
-        if !body_middle_owned {
+        if !middle_owned {
             if surface_focused != self.surface_focused {
                 self.update_caret_blink_focus(ui.ctx(), surface_focused);
                 self.request_repaint(ui.ctx());
@@ -181,7 +192,7 @@ impl ScriptCraftApp {
                     .and_then(|origin| alt_control_at(alt_controls, Some(origin)))
             })
             .flatten();
-        let alt_pointer_action = !body_middle_owned
+        let alt_pointer_action = !middle_owned
             && (body_primary_clicked
                 || response.secondary_clicked()
                 || body_primary_drag_started
@@ -293,7 +304,7 @@ impl ScriptCraftApp {
                 // creation gesture or replace the screenplay range.
                 return;
             }
-            if !body_middle_owned && body_primary_clicked {
+            if !middle_owned && body_primary_clicked {
                 let note = marker_hit
                     .and_then(|marker| marker.note_ids.first())
                     .cloned();
@@ -325,7 +336,7 @@ impl ScriptCraftApp {
                 }
                 return;
             }
-            if !body_middle_owned && (body_primary_drag_started || body_primary_dragged) {
+            if !middle_owned && (body_primary_drag_started || body_primary_dragged) {
                 return;
             }
         }
@@ -338,11 +349,11 @@ impl ScriptCraftApp {
                         !layout.pages[page_index].title_page && page.rect.contains(position)
                     })
             })
-            && !body_middle_owned
+            && !middle_owned
             && (if surface == EditorSurface::Body {
                 body_primary_clicked || response.secondary_clicked()
             } else {
-                response.clicked() || response.secondary_clicked()
+                body_primary_clicked || response.secondary_clicked()
             })
         {
             self.dispatch_command(
@@ -351,7 +362,7 @@ impl ScriptCraftApp {
             );
         }
         if surface == EditorSurface::Body
-            && !body_middle_owned
+            && !middle_owned
             && response.secondary_clicked()
         {
             self.native_input_diagnostics.pointer_activations = self
@@ -412,20 +423,11 @@ impl ScriptCraftApp {
                 }
             }
         } else if let Some(pointer) = pointer {
-            let pointer_active = if surface == EditorSurface::Body {
-                !body_middle_owned
-                    && (body_primary_clicked
-                        || body_primary_drag_started
-                        || body_primary_dragged
-                        || (response.hovered() && body_primary_down))
-            } else {
-                response.clicked()
-                    || response.double_clicked()
-                    || response.triple_clicked()
-                    || response.drag_started()
-                    || response.dragged()
-                    || (response.hovered() && body_primary_down)
-            };
+            let pointer_active = !middle_owned
+                && (body_primary_clicked
+                    || body_primary_drag_started
+                    || body_primary_dragged
+                    || (response.hovered() && body_primary_down));
             if pointer_active {
                 self.native_input_diagnostics.pointer_activations = self
                     .native_input_diagnostics
@@ -447,25 +449,13 @@ impl ScriptCraftApp {
                         pointer,
                         Some(projections),
                     ) {
-                        let phase = if surface == EditorSurface::Body {
-                            if body_primary_drag_started {
-                                PointerPhase::Press
-                            } else if body_primary_dragged {
-                                PointerPhase::Drag
-                            } else if body_primary_clicked && response.triple_clicked() {
-                                PointerPhase::TripleClick
-                            } else if body_primary_clicked && response.double_clicked() {
-                                PointerPhase::DoubleClick
-                            } else {
-                                PointerPhase::Release
-                            }
-                        } else if response.drag_started() {
+                        let phase = if body_primary_drag_started {
                             PointerPhase::Press
-                        } else if response.dragged() {
+                        } else if body_primary_dragged {
                             PointerPhase::Drag
-                        } else if response.triple_clicked() {
+                        } else if body_primary_clicked && response.triple_clicked() {
                             PointerPhase::TripleClick
-                        } else if response.double_clicked() {
+                        } else if body_primary_clicked && response.double_clicked() {
                             PointerPhase::DoubleClick
                         } else {
                             PointerPhase::Release

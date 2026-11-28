@@ -576,6 +576,15 @@ impl eframe::App for ScriptCraftApp {
         {
             self.reset_body_auto_scroll();
         }
+        if title_page_viewport
+            && (viewport_close_requested
+                || raw_focus_lost
+                || !self.title_page_window_open
+                || self.title_auto_scroll_blocked(ctx))
+        {
+            self.reset_title_auto_scroll();
+            self.title_view.wheel_zoom.reset();
+        }
         let viewport_height_points = raw_input
             .screen_rect
             .map_or_else(|| ctx.content_rect().height(), |rect| rect.height());
@@ -665,8 +674,11 @@ impl eframe::App for ScriptCraftApp {
             {
                 adapter.reset();
                 Vec::new()
+            } else if title_page_viewport {
+                // The immediate Title callback owns this viewport's wheel/middle
+                // adaptation after its independent transient state is active.
+                Vec::new()
             } else if root_viewport
-                && !title_page_viewport
                 && self.root_document_view == RootDocumentView::Script
             {
                 let mut owners = body_middle_owners.into_iter();

@@ -646,6 +646,7 @@ impl ScriptCraftApp {
         self.surface_focused = false;
         self.session = replacement;
         self.reset_body_auto_scroll();
+        self.reset_title_auto_scroll();
         self.beat_auto_scroll.reset();
         self.script_note_workspace.reset_document_activation();
         self.script_view_mode = script_view_mode;

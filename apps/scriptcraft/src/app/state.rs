@@ -63,6 +63,9 @@ pub(crate) struct TitlePageViewState {
     pub(crate) caret_blink_focus_generation: u64,
     pub(crate) caret_blink_reset_time: f64,
     pub(crate) wheel_zoom: wheel_zoom::WheelZoomAdapter,
+    /// Independent transient page-surface auto-scroll state; Body keeps its own
+    /// live state on the application and is never swapped with this Title value.
+    pub(crate) auto_scroll: crate::views::script::BodyAutoScrollState,
 }
 
 impl Default for TitlePageViewState {
@@ -84,6 +87,7 @@ impl Default for TitlePageViewState {
             caret_blink_focus_generation: 0,
             caret_blink_reset_time: 0.0,
             wheel_zoom: wheel_zoom::WheelZoomAdapter::default(),
+            auto_scroll: crate::views::script::BodyAutoScrollState::default(),
         }
     }
 }
